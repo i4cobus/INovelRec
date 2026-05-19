@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+data/raw/
+data/processed/
+data/index/
+docs/
+uv.lock

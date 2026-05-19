@@ -1,4 +1,4 @@
-# AI-Powered Chinese Web Novel Recommendation System
+# Chinese Web Novel Recommendation System
 
 This project is a local AI application that turns a personal corpus of Chinese web novels into searchable and explainable recommendation data.
 

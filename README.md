@@ -57,6 +57,41 @@ uv run python scripts/02_build_profiles.py --inventory data/processed/novels.par
 
 `profile_text` includes title, optional author, length, chapter count, opening sample, middle sample, and ending sample. It is capped around 1,000-3,000 Chinese characters by default.
 
+## Stage 3: Embeddings and FAISS Index
+
+Stage 3 reads `data/processed/novel_profiles.parquet`, embeds each compact `profile_text`, and builds a FAISS vector index for semantic retrieval.
+
+Run a small index build:
+
+```bash
+uv run python scripts/03_build_index.py --limit 100 --overwrite
+```
+
+Run a search demo:
+
+```bash
+uv run python scripts/04_search_demo.py "凡人流 仙侠 慢热 理性主角 不后宫"
+```
+
+Expected index outputs:
+
+- `data/index/faiss.index`
+- `data/index/novel_id_map.json`
+- `data/index/index_metadata.json`
+
+The default model is `Qwen/Qwen3-Embedding-4B`. To switch models later, pass `--model` to both index building and search with the same model name.
+
+On a CUDA-capable Windows machine, make sure the uv environment has a CUDA-enabled PyTorch build, then pass `--device cuda`:
+
+```bash
+uv run python scripts/03_build_index.py --limit 100 --overwrite --device cuda
+uv run python scripts/04_search_demo.py "凡人流 仙侠 慢热 理性主角 不后宫" --device cuda
+```
+
+Compact profiles are used instead of full novels because full novels are too long for direct embedding and would dilute useful retrieval signals. The profile keeps title, optional author, length, chapter count, and representative opening, middle, and ending samples.
+
+The FAISS index uses normalized vectors with `IndexFlatIP`. When vectors are normalized to unit length, inner product is equivalent to cosine similarity.
+
 ## Project Structure
 
 ```text
@@ -69,20 +104,27 @@ INovelRec/
 |   `-- index/
 |-- scripts/
 |   |-- 01_inventory.py
-|   `-- 02_build_profiles.py
+|   |-- 02_build_profiles.py
+|   |-- 03_build_index.py
+|   `-- 04_search_demo.py
 |-- src/
 |   |-- __init__.py
 |   |-- clean.py
 |   |-- config.py
+|   |-- embed.py
 |   |-- ingest.py
 |   |-- profile.py
+|   |-- search.py
 |   |-- schema.py
 |   |-- split_chapters.py
+|   |-- vector_index.py
 |   `-- text_utils.py
 |-- tests/
 |   |-- test_clean.py
+|   |-- test_embed.py
 |   |-- test_ingest.py
-|   `-- test_profile.py
+|   |-- test_profile.py
+|   `-- test_vector_index.py
 `-- docs/
 ```
 
@@ -94,8 +136,6 @@ uv sync
 
 ## Next Stages
 
-- Stage 3: embedding generation
-- Stage 4: FAISS semantic search
+- Stage 4: ranking and recommendation logic
 - Stage 5: explainable recommendation backend
 - Stage 6: Streamlit or FastAPI UI
-

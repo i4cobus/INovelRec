@@ -14,9 +14,11 @@ dependencies = [
   "rich>=13.7.0",
   "sentence-transformers>=3.0.0",
   "faiss-cpu>=1.8.0",
+  "torch>=2.12.0",
   "tqdm>=4.66.0",
   "typer>=0.12.3",
   "pytest>=8.2.0",
+  "huggingface-hub>=1.15.0",
 ]
 
 [project.optional-dependencies]
@@ -31,3 +33,13 @@ packages = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu126", marker = "platform_system == 'Windows'" },
+]

@@ -28,8 +28,8 @@ class CandidateMatcher(Protocol):
 
 @dataclass(frozen=True)
 class RankingWeights:
-    semantic_weight: float = 0.35
-    llm_match_weight: float = 0.55
+    semantic_weight: float = 0.40
+    llm_match_weight: float = 0.50
     confidence_weight: float = 0.10
 
 

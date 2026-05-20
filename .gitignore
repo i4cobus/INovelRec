@@ -9,3 +9,4 @@ data/cache/
 reports/
 docs/prompt*.md
 uv.lock
+streamlit.out.log

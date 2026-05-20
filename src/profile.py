@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 from tqdm import tqdm
 
-from src.clean import clean_novel_text
+from src.clean import CleaningStats, clean_novel_text_with_stats, contains_zxcs_boilerplate
 from src.config import DEFAULT_OUTPUT_PATH, PROCESSED_DATA_DIR
 from src.split_chapters import split_chapters
 
@@ -25,6 +25,9 @@ class ProfileBuildResult:
     skipped_failed: int
     skipped_missing: int
     skipped_read_error: int
+    zxcs_boilerplate_detected: int = 0
+    zxcs_boilerplate_lines_removed: int = 0
+    profiles_with_remaining_boilerplate: int = 0
 
 
 def read_text_with_encoding(path: Path, encoding: str | None) -> str:
@@ -95,15 +98,25 @@ def make_profile_text(
 def build_profile_from_inventory_row(row: dict[str, Any], max_profile_chars: int = 3000) -> dict[str, Any] | None:
     """Build one profile row, returning None for failed or missing files."""
 
+    profile, _ = build_profile_from_inventory_row_with_stats(row, max_profile_chars=max_profile_chars)
+    return profile
+
+
+def build_profile_from_inventory_row_with_stats(
+    row: dict[str, Any],
+    max_profile_chars: int = 3000,
+) -> tuple[dict[str, Any] | None, CleaningStats]:
+    """Build one profile row and return cleaning stats for reporting."""
+
     if row.get("read_status") != "ok":
-        return None
+        return None, CleaningStats()
 
     path = Path(str(row.get("absolute_path", "")))
     if not path.exists():
-        return None
+        return None, CleaningStats()
 
     raw_text = read_text_with_encoding(path, row.get("detected_encoding"))
-    cleaned_text = clean_novel_text(raw_text)
+    cleaned_text, cleaning_stats = clean_novel_text_with_stats(raw_text)
     chapters = split_chapters(cleaned_text)
     chapter_count = len(chapters)
     opening, middle, ending = extract_profile_samples(cleaned_text)
@@ -112,26 +125,28 @@ def build_profile_from_inventory_row(row: dict[str, Any], max_profile_chars: int
     author_value = row.get("author_guess")
     author_guess = None if pd.isna(author_value) else str(author_value)
 
+    profile_text = make_profile_text(
+        title_guess=title_guess,
+        author_guess=author_guess,
+        char_count=char_count,
+        chapter_count=chapter_count,
+        opening_sample=opening,
+        middle_sample=middle,
+        ending_sample=ending,
+        max_chars=max_profile_chars,
+    )
+
     return {
         "novel_id": row["novel_id"],
         "title_guess": title_guess,
         "author_guess": author_guess,
         "char_count": char_count,
         "estimated_chapter_count": chapter_count,
-        "profile_text": make_profile_text(
-            title_guess=title_guess,
-            author_guess=author_guess,
-            char_count=char_count,
-            chapter_count=chapter_count,
-            opening_sample=opening,
-            middle_sample=middle,
-            ending_sample=ending,
-            max_chars=max_profile_chars,
-        ),
+        "profile_text": profile_text,
         "opening_sample": opening,
         "middle_sample": middle,
         "ending_sample": ending,
-    }
+    }, cleaning_stats
 
 
 def build_profiles(
@@ -149,6 +164,9 @@ def build_profiles(
     skipped_failed = 0
     skipped_missing = 0
     skipped_read_error = 0
+    zxcs_boilerplate_detected = 0
+    zxcs_boilerplate_lines_removed = 0
+    profiles_with_remaining_boilerplate = 0
 
     for row in tqdm(inventory.to_dict(orient="records"), desc="Building profiles", unit="novel"):
         if row.get("read_status") != "ok":
@@ -161,12 +179,20 @@ def build_profiles(
             continue
 
         try:
-            profile = build_profile_from_inventory_row(row, max_profile_chars=max_profile_chars)
+            profile, cleaning_stats = build_profile_from_inventory_row_with_stats(row, max_profile_chars=max_profile_chars)
         except (OSError, UnicodeError, LookupError, ValueError):
             skipped_read_error += 1
             continue
 
         if profile is not None:
+            if cleaning_stats.zxcs_detected:
+                zxcs_boilerplate_detected += 1
+                zxcs_boilerplate_lines_removed += cleaning_stats.zxcs_lines_removed
+            if any(
+                contains_zxcs_boilerplate(str(profile.get(column, "")))
+                for column in ("profile_text", "opening_sample", "middle_sample", "ending_sample")
+            ):
+                profiles_with_remaining_boilerplate += 1
             records.append(profile)
 
     return ProfileBuildResult(
@@ -175,6 +201,9 @@ def build_profiles(
         skipped_failed=skipped_failed,
         skipped_missing=skipped_missing,
         skipped_read_error=skipped_read_error,
+        zxcs_boilerplate_detected=zxcs_boilerplate_detected,
+        zxcs_boilerplate_lines_removed=zxcs_boilerplate_lines_removed,
+        profiles_with_remaining_boilerplate=profiles_with_remaining_boilerplate,
     )
 
 
@@ -184,4 +213,3 @@ def write_profiles(result: ProfileBuildResult, output_path: Path) -> pd.DataFram
     output_path.parent.mkdir(parents=True, exist_ok=True)
     result.dataframe.to_parquet(output_path, index=False)
     return result.dataframe
-

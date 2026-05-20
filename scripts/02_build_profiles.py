@@ -39,12 +39,16 @@ def main(
     summary.add_row("Skipped failed inventory rows", str(result.skipped_failed))
     summary.add_row("Skipped missing files", str(result.skipped_missing))
     summary.add_row("Skipped read errors", str(result.skipped_read_error))
+    summary.add_row("ZXCS boilerplate detected", str(result.zxcs_boilerplate_detected))
+    summary.add_row("ZXCS boilerplate lines removed", str(result.zxcs_boilerplate_lines_removed))
+    summary.add_row("Profiles with remaining ZXCS markers", str(result.profiles_with_remaining_boilerplate))
     if not df.empty:
         summary.add_row("Avg profile chars", f"{df['profile_text'].str.len().mean():.2f}")
         summary.add_row("Avg chapter count", f"{df['estimated_chapter_count'].mean():.2f}")
     console.print(summary)
+    if result.profiles_with_remaining_boilerplate:
+        console.print("[yellow]Warning:[/yellow] ZXCS markers remain in some generated profiles.")
 
 
 if __name__ == "__main__":
     app()
-

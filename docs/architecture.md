@@ -48,6 +48,8 @@ query
 -> cache reuse from data/cache/llm_rerank_cache.jsonl
 -> final hybrid reranking
 -> explainable top-k recommendations
+-> local Qwen3 Transformers explanation generation
+-> grounded recommendation report
 ```
 
 Domain hints such as `凡人流 -> 普通资质, 草根修仙, 谨慎, 炼气, 筑基, 宗门` are retrieval-only recall hints. They are not final scoring tags. The final rank still depends on FAISS retrieval strength, local LLM candidate analysis, confidence, and risk penalties.
@@ -82,3 +84,21 @@ Risk penalties:
 - `0.05` if confidence is low
 
 Candidates outside `llm-candidate-k` receive `analysis_provider = semantic_fallback` and keep a lower-priority semantic fallback score.
+
+## Stage 5
+
+Stage 5 is explanation and reporting. It does not retrieve, rerank, rebuild embeddings, or change recommendation order.
+
+```text
+query
+-> Stage 4 LLM-assisted recommendation reranking
+-> final ranked candidates
+-> local Qwen3 Transformers explanation generation
+-> grounded recommendation report
+```
+
+Stage 4 is ranking. Stage 5 is explanation/reporting.
+
+The explanation prompt includes the original query, final rank, title, scores, matched preferences, violated preferences, risk flags, Stage 4 reason, and compact profile evidence. The prompt explicitly instructs the model to use only provided evidence and not invent plot details, popularity, author facts, ratings, or completion status.
+
+If the local model returns invalid JSON, Stage 5 falls back to a deterministic explanation built from Stage 4 fields. This keeps the report pipeline stable.

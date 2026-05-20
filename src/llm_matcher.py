@@ -139,20 +139,25 @@ class TransformersMatcher:
         )
         self.max_new_tokens = max_new_tokens
 
-    def score(self, query: str, candidate: dict[str, Any], profile_text: str, max_profile_chars: int = 1200) -> LLMMatchResult:
-        prompt = build_match_prompt(query=query, candidate=candidate, profile_text=profile_text, max_profile_chars=max_profile_chars)
+    def generate_response(self, prompt: str, max_new_tokens: int | None = None) -> str:
+        """Generate a short response from the local chat model."""
+
         messages = [{"role": "user", "content": prompt}]
         text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
         outputs = self.model.generate(
             **inputs,
-            max_new_tokens=self.max_new_tokens,
+            max_new_tokens=max_new_tokens or self.max_new_tokens,
             do_sample=False,
             temperature=None,
             top_p=None,
         )
         generated = outputs[0][inputs.input_ids.shape[-1]:]
-        response = self.tokenizer.decode(generated, skip_special_tokens=True)
+        return self.tokenizer.decode(generated, skip_special_tokens=True)
+
+    def score(self, query: str, candidate: dict[str, Any], profile_text: str, max_profile_chars: int = 1200) -> LLMMatchResult:
+        prompt = build_match_prompt(query=query, candidate=candidate, profile_text=profile_text, max_profile_chars=max_profile_chars)
+        response = self.generate_response(prompt)
         try:
             return parse_llm_match_result(response)
         except (ValueError, json.JSONDecodeError, TypeError):
@@ -167,18 +172,7 @@ class TransformersMatcher:
         """Generate retrieval-friendly expanded queries as raw JSON text."""
 
         prompt = build_query_expansion_prompt(raw_query=raw_query, max_queries=max_queries)
-        messages = [{"role": "user", "content": prompt}]
-        text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
-        outputs = self.model.generate(
-            **inputs,
-            max_new_tokens=min(self.max_new_tokens, 256),
-            do_sample=False,
-            temperature=None,
-            top_p=None,
-        )
-        generated = outputs[0][inputs.input_ids.shape[-1]:]
-        return self.tokenizer.decode(generated, skip_special_tokens=True)
+        return self.generate_response(prompt, max_new_tokens=min(self.max_new_tokens, 256))
 
 
 def create_transformers_matcher(

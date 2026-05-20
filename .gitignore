@@ -6,5 +6,6 @@ data/raw/
 data/processed/
 data/index/
 data/cache/
+reports/
 docs/prompt*.md
 uv.lock

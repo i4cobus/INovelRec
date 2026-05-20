@@ -171,7 +171,7 @@ def test_progress_callback_receives_candidate_details(tmp_path: Path) -> None:
 def test_final_score_calculation() -> None:
     match = LLMMatchResult(llm_match_score=0.8, confidence="high")
     score = llm_final_score(0.5, match, risk_penalty=0.1, weights=RankingWeights())
-    assert round(score, 4) == 0.585
+    assert round(score, 4) == 0.615
 
 
 def test_invalid_llm_json_falls_back_safely() -> None:

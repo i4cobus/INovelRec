@@ -4,6 +4,16 @@ This project is a local AI application that turns a personal corpus of Chinese w
 
 It is not mainly a traditional collaborative-filtering recommender. The core engineering work is unstructured text ingestion, Chinese text cleaning, profile generation, embeddings, vector retrieval, local LLM reranking, grounded explanation generation, and an interactive demo app.
 
+## Demo
+
+Streamlit demo interface:
+
+![Streamlit recommendation demo](demo/demo1.png)
+
+Explainable recommendation cards:
+
+![Explainable recommendation results](demo/demo2.png)
+
 ## Setup
 
 ```bash
@@ -50,6 +60,16 @@ uv run python scripts/05_recommend_demo.py "凡人流 仙侠 慢热 理性主角
 ```
 
 Domain hints are used only for retrieval expansion, not final scoring. Final ranking is based on semantic retrieval signals, local LLM match score, confidence, and risk penalties.
+
+Current Stage 4 scoring:
+
+```text
+final_score =
+0.40 * normalized_semantic_score
++ 0.50 * llm_match_score
++ 0.10 * confidence_score
+- risk_penalty
+```
 
 ## Stage 5: Explanation and Recommendation Report
 

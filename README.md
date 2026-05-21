@@ -282,6 +282,39 @@ The app demonstrates:
 
 First run can be slow because local Hugging Face models are loaded into GPU memory. Later button clicks should be faster because Streamlit caches the embedding model, local Qwen LLM, FAISS index, id map, and profile lookup.
 
+
+## Evaluation
+
+The system is evaluated with manually designed preference queries in `eval/eval_queries.jsonl`. Because the private corpus has no official relevance labels or genre annotations, evaluation combines lightweight automatic anchor checks with optional manual judgement.
+
+The main comparison is:
+
+- `baseline_faiss`: FAISS-only semantic retrieval from the raw query.
+- `full_llm_rerank`: query expansion, multi-query FAISS retrieval, and local Qwen3 LLM reranking.
+
+Automatic metrics include `Anchor Hit@K`, `Anchor Recall@K`, and average first anchor rank when optional `anchor_titles` are provided. Manual judgement metrics include `Precision@K`, strong `Precision@K`, average relevance score, and constraint violation rate. These metrics are intended to compare system variants and diagnose failure cases, not to claim objective benchmark performance.
+
+Baseline-only quick evaluation:
+
+```bash
+uv run python scripts/07_evaluate.py --mode baseline --top-k 10 --candidate-k 100
+```
+
+Full evaluation:
+
+```bash
+uv run python scripts/07_evaluate.py --mode both --top-k 10 --candidate-k 100 --llm-candidate-k 10
+```
+
+Manual metric calculation after filling `eval/manual_judgements.csv`:
+
+```bash
+uv run python scripts/08_eval_metrics.py --judgements eval/manual_judgements.csv --k 10
+```
+
+See [docs/evaluation.md](docs/evaluation.md) for the dataset format, judgement template, metrics, and limitations.
+
+
 ## Data and Model Notes
 
 - Raw TXT files are not included in the repository.

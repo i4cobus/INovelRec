@@ -1,0 +1,10 @@
+{"query_id":"q001","query":"凡人流 仙侠 慢热 理性主角 不系统","wanted":["凡人流","仙侠","慢热","理性主角"],"unwanted":["系统"],"anchor_titles":["凡人修仙传"],"notes":"Tests whether the system can retrieve classic slow-burn xianxia novels. Anchor is optional and corpus-dependent."}
+{"query_id":"q002","query":"都市异能 节奏快 主角冷静 不无脑爽文","wanted":["都市异能","节奏快","主角冷静"],"unwanted":["无脑爽文"],"anchor_titles":[],"notes":"Tests modern urban supernatural preference matching with a negative quality constraint."}
+{"query_id":"q003","query":"赛博朋克 科幻 群像 智能体 社会冲突","wanted":["赛博朋克","科幻","群像","智能体","社会冲突"],"unwanted":[],"anchor_titles":[],"notes":"Tests science fiction and cyberpunk-style retrieval."}
+{"query_id":"q004","query":"西幻 冒险 小队成长 世界观完整","wanted":["西幻","冒险","小队成长","世界观完整"],"unwanted":[],"anchor_titles":[],"notes":"Tests western fantasy adventure and team-growth signals."}
+{"query_id":"q005","query":"克苏鲁 悬疑 慢热 氛围感强","wanted":["克苏鲁","悬疑","慢热","氛围感"],"unwanted":[],"anchor_titles":[],"notes":"Tests horror/mystery atmosphere and slow-burn matching."}
+{"query_id":"q006","query":"历史 权谋 朝堂 智斗 不玄幻","wanted":["历史","权谋","朝堂","智斗"],"unwanted":["玄幻"],"anchor_titles":[],"notes":"Tests historical political-strategy preferences and explicit genre exclusion."}
+{"query_id":"q007","query":"游戏 系统 升级流 任务奖励 节奏快","wanted":["游戏","系统","升级流","任务奖励","节奏快"],"unwanted":[],"anchor_titles":[],"notes":"Tests system/game mechanics as positive preferences."}
+{"query_id":"q008","query":"群像 战争 战术 军团 多阵营","wanted":["群像","战争","战术","军团","多阵营"],"unwanted":[],"anchor_titles":[],"notes":"Tests large-cast war and faction-oriented recommendations."}
+{"query_id":"q009","query":"轻松日常 治愈 幽默 不虐主","wanted":["轻松日常","治愈","幽默"],"unwanted":["虐主"],"anchor_titles":[],"notes":"Tests lighter slice-of-life preference with negative emotional constraint."}
+{"query_id":"q010","query":"无女主 低感情线 专注修炼 主角独行","wanted":["无女主","低感情线","专注修炼","主角独行"],"unwanted":[],"anchor_titles":[],"notes":"Tests romance-light or no-romance preferences."}

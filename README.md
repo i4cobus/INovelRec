@@ -194,6 +194,15 @@ After profile cleaning is verified, rebuild the FAISS index:
 uv run python scripts/03_build_index.py --overwrite --device cuda
 ```
 
+| Metric | Value |
+|------|------|
+| Profiles written | 7,655 / 7,666 |
+| Rate | 99.86% |
+| boilerplate detected | 7,575 |
+| boilerplate lines removed | 45,380  |
+| Avg profile chars | 2,014  |
+| Avg chapter count | 796  |
+
 ### Stage 3: Embeddings and FAISS Index
 
 Stage 3 embeds compact profiles with `Qwen/Qwen3-Embedding-4B` and builds a FAISS `IndexFlatIP` index.
@@ -204,9 +213,29 @@ Expected files:
 - `data/index/novel_id_map.json`
 - `data/index/index_metadata.json`
 
+| Metric           |                                                        Value |
+| ---------------- | -------------------------------------------------------------|
+| Profiles loaded  |                                                         7655 |
+| Profiles skipped |                                                            0 |
+| Embedding shape  |                                                 (7655, 2560) |
+| Device           |                                                     RTX 4080 |
+| FAISS index size |                                                         7655 |
+| Runtime          |                                                ~14.47 hours  |
+| Processing speed |                                         8.8 seconds/profile  |
+
+
 ### Stage 4: Query Expansion and Local LLM Reranking
 
 Domain hints are used only for retrieval expansion, not final scoring. Final ranking is based on semantic retrieval signals, local LLM match score, confidence, and risk penalties.
+
+Stage 4 uses diversified LLM candidate selection so strong recall candidates are not skipped just because they appear lower in the merged retrieval order. The selector chooses candidates from multiple priority views:
+
+- top candidates by merged `retrieval_score`
+- top candidates by semantic score
+- top candidates by `best_faiss_rank`
+- optional `--debug-target-title` inclusion for diagnosis
+
+Each selected candidate includes `llm_selection_reasons`, such as `retrieval_score_top`, `semantic_score_top`, or `best_faiss_rank_top`. The CLI table displays these reasons alongside `selected_for_llm`, `best_faiss_rank`, semantic score, matched query count, and retrieval sources.
 
 Current Stage 4 scoring:
 
@@ -217,6 +246,16 @@ final_score =
 + 0.10 * confidence_score
 - risk_penalty
 ```
+
+Candidates that are not sent to the LLM receive a semantic fallback score:
+
+```text
+fallback_final_score =
+0.35 * normalized_semantic_score
++ 0.05 * matched_query_count_bonus
+```
+
+This keeps high-quality semantic candidates visible while still giving priority to strong LLM-scored matches.
 
 ### Stage 5: Explanation and Recommendation Report
 

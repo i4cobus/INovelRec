@@ -10,6 +10,8 @@ from src.rank import (
     llm_final_score,
     rerank_candidates_with_llm,
     resolve_llm_candidate_k,
+    select_llm_candidates,
+    semantic_fallback_score,
     truncate_profile,
 )
 
@@ -189,3 +191,55 @@ def test_risk_penalty_rules() -> None:
         risk_flags=["source_site_boilerplate"],
     )
     assert compute_risk_penalty(match, "profile") == 0.25
+
+
+def test_high_semantic_candidate_selected_for_llm() -> None:
+    items = [
+        {"novel_id": "retrieval", "title_guess": "Retrieval", "retrieval_score": 0.95, "score": 0.4, "best_faiss_rank": 20},
+        {"novel_id": "semantic", "title_guess": "Semantic", "retrieval_score": 0.5, "score": 0.99, "best_faiss_rank": 15},
+        {"novel_id": "other", "title_guess": "Other", "retrieval_score": 0.49, "score": 0.3, "best_faiss_rank": 10},
+    ]
+    selected = select_llm_candidates(items, llm_candidate_k=2)
+    hit = next(item for item in selected if item["novel_id"] == "semantic")
+    assert "semantic_score_top" in hit["llm_selection_reasons"]
+
+
+def test_best_faiss_rank_one_selected_for_llm() -> None:
+    items = [
+        {"novel_id": "a", "title_guess": "A", "retrieval_score": 0.95, "score": 0.9, "best_faiss_rank": 20},
+        {"novel_id": "b", "title_guess": "B", "retrieval_score": 0.9, "score": 0.8, "best_faiss_rank": 30},
+        {"novel_id": "faiss1", "title_guess": "Best", "retrieval_score": 0.1, "score": 0.7, "best_faiss_rank": 1},
+    ]
+    selected = select_llm_candidates(items, llm_candidate_k=3)
+    hit = next(item for item in selected if item["novel_id"] == "faiss1")
+    assert "best_faiss_rank_top" in hit["llm_selection_reasons"]
+
+
+def test_debug_target_forced_include_respects_k() -> None:
+    items = [
+        {"novel_id": "a", "title_guess": "A", "retrieval_score": 0.95, "score": 0.9, "best_faiss_rank": 1},
+        {"novel_id": "b", "title_guess": "B", "retrieval_score": 0.9, "score": 0.8, "best_faiss_rank": 2},
+        {"novel_id": "target", "title_guess": "凡人修仙传", "retrieval_score": 0.1, "score": 0.2, "best_faiss_rank": 99},
+    ]
+    selected = select_llm_candidates(items, llm_candidate_k=2, debug_target_title="凡人修仙传")
+    assert len(selected) == 2
+    hit = next(item for item in selected if item["novel_id"] == "target")
+    assert "debug_target_forced" in hit["llm_selection_reasons"]
+
+
+def test_rerank_output_includes_selection_reasons(tmp_path: Path) -> None:
+    matcher = CountingMatcher(LLMMatchResult(llm_match_score=0.7, confidence="medium"))
+    ranked, _ = rerank_candidates_with_llm(
+        query="query",
+        candidates=candidates(2),
+        matcher=matcher,
+        llm_candidate_k=1,
+        use_cache=False,
+        cache_path=tmp_path / "cache.jsonl",
+    )
+    selected = next(row for row in ranked if row["selected_for_llm"])
+    assert selected["llm_selection_reasons"]
+
+
+def test_semantic_fallback_score_not_extremely_low() -> None:
+    assert semantic_fallback_score(0.95, matched_query_count=2) >= 0.35

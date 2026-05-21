@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -70,6 +71,12 @@ class LLMProgressEvent:
 ProgressCallback = Callable[[LLMProgressEvent], None]
 
 
+def candidate_key(candidate: dict[str, Any], fallback: int = 0) -> str:
+    """Return a stable candidate key for selection and scoring maps."""
+
+    return str(candidate.get("novel_id") or candidate.get("title_guess") or fallback)
+
+
 def normalize_semantic_scores(candidates: list[dict[str, Any]]) -> dict[str, float]:
     """Normalize semantic scores to 0..1 across candidates."""
 
@@ -112,6 +119,140 @@ def resolve_llm_candidate_k(candidate_k: int, llm_candidate_k: int | None) -> tu
     if resolved > candidate_k:
         return candidate_k, f"llm-candidate-k {resolved} exceeds candidate-k {candidate_k}; clamped to {candidate_k}."
     return resolved, None
+
+
+def llm_selection_quotas(llm_candidate_k: int) -> tuple[int, int, int]:
+    """Allocate LLM scoring slots across retrieval, semantic, and FAISS-rank views."""
+
+    if llm_candidate_k <= 0:
+        raise ValueError("llm_candidate_k must be positive")
+    if llm_candidate_k == 1:
+        return 1, 0, 0
+    if llm_candidate_k == 2:
+        return 1, 1, 0
+
+    retrieval_slots = max(1, math.ceil(0.5 * llm_candidate_k))
+    semantic_slots = max(1, math.ceil(0.3 * llm_candidate_k))
+    faiss_slots = max(1, llm_candidate_k - retrieval_slots - semantic_slots)
+
+    while retrieval_slots + semantic_slots + faiss_slots > llm_candidate_k:
+        if retrieval_slots >= semantic_slots and retrieval_slots > 1:
+            retrieval_slots -= 1
+        elif semantic_slots > 1:
+            semantic_slots -= 1
+        else:
+            faiss_slots -= 1
+    return retrieval_slots, semantic_slots, faiss_slots
+
+
+def semantic_score_value(candidate: dict[str, Any]) -> float:
+    """Return the best available semantic score for a candidate."""
+
+    return float(candidate.get("best_semantic_score", candidate.get("semantic_score", candidate.get("score", 0.0))))
+
+
+def best_faiss_rank_value(candidate: dict[str, Any]) -> int:
+    """Return best FAISS rank, using a large value when missing."""
+
+    try:
+        return int(candidate.get("best_faiss_rank", candidate.get("rank", 1_000_000)))
+    except (TypeError, ValueError):
+        return 1_000_000
+
+
+def add_selection_candidate(
+    selected: dict[str, dict[str, Any]],
+    candidate: dict[str, Any],
+    reason: str,
+    *,
+    fallback_index: int,
+) -> None:
+    """Add a selected candidate or append an additional selection reason."""
+
+    key = candidate_key(candidate, fallback=fallback_index)
+    if key in selected:
+        reasons = selected[key].setdefault("llm_selection_reasons", [])
+        if reason not in reasons:
+            reasons.append(reason)
+        if len(reasons) > 1 and "already_selected_multiple_reasons" not in reasons:
+            reasons.append("already_selected_multiple_reasons")
+        return
+
+    selected[key] = {
+        **candidate,
+        "llm_selection_reasons": [reason],
+        "llm_selection_reason": reason,
+    }
+
+
+def select_llm_candidates(
+    candidates: list[dict[str, Any]],
+    llm_candidate_k: int,
+    debug_target_title: str | None = None,
+) -> list[dict[str, Any]]:
+    """Select a diversified set of candidates for expensive local LLM scoring."""
+
+    if llm_candidate_k <= 0:
+        raise ValueError("llm_candidate_k must be positive")
+    if not candidates:
+        return []
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for idx, candidate in enumerate(candidates):
+        key = candidate_key(candidate, fallback=idx)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+
+    selected: dict[str, dict[str, Any]] = {}
+    retrieval_slots, semantic_slots, faiss_slots = llm_selection_quotas(min(llm_candidate_k, len(deduped)))
+    views = [
+        (
+            sorted(deduped, key=lambda item: float(item.get("retrieval_score", item.get("score", 0.0))), reverse=True)[:retrieval_slots],
+            "retrieval_score_top",
+        ),
+        (
+            sorted(deduped, key=semantic_score_value, reverse=True)[:semantic_slots],
+            "semantic_score_top",
+        ),
+        (
+            sorted(deduped, key=best_faiss_rank_value)[:faiss_slots],
+            "best_faiss_rank_top",
+        ),
+    ]
+
+    for view, reason in views:
+        for candidate in view:
+            if len(selected) >= llm_candidate_k and candidate_key(candidate) not in selected:
+                continue
+            add_selection_candidate(selected, candidate, reason, fallback_index=deduped.index(candidate))
+
+    if len(selected) < llm_candidate_k:
+        fill_view = sorted(deduped, key=lambda item: float(item.get("retrieval_score", item.get("score", 0.0))), reverse=True)
+        for candidate in fill_view:
+            if len(selected) >= llm_candidate_k:
+                break
+            if candidate_key(candidate) not in selected:
+                add_selection_candidate(selected, candidate, "retrieval_score_top", fallback_index=deduped.index(candidate))
+
+    if debug_target_title:
+        target = next((candidate for candidate in deduped if debug_target_title in str(candidate.get("title_guess", ""))), None)
+        if target is not None:
+            key = candidate_key(target)
+            if key in selected:
+                pass
+            elif len(selected) < llm_candidate_k:
+                add_selection_candidate(selected, target, "debug_target_forced", fallback_index=deduped.index(target))
+            else:
+                # Replace the lowest-priority selected candidate so debug can verify the expected title.
+                last_key = next(reversed(selected))
+                selected.pop(last_key)
+                forced = {**target, "llm_selection_forced_replacement": True}
+                add_selection_candidate(selected, forced, "debug_target_forced", fallback_index=deduped.index(target))
+
+    return list(selected.values())[:llm_candidate_k]
 
 
 def truncate_profile(profile_text: str, max_chars: int) -> str:
@@ -207,10 +348,11 @@ def llm_final_score(normalized_semantic_score: float, match: LLMMatchResult, ris
     )
 
 
-def semantic_fallback_score(normalized_semantic_score: float) -> float:
-    """Keep non-LLM-scored candidates below strong LLM-scored candidates."""
+def semantic_fallback_score(normalized_semantic_score: float, matched_query_count: int = 1) -> float:
+    """Keep fallback candidates comparable while below strong LLM-scored candidates."""
 
-    return 0.30 * normalized_semantic_score
+    matched_query_bonus = min(max(matched_query_count, 0) / 5.0, 1.0)
+    return (0.35 * normalized_semantic_score) + (0.05 * matched_query_bonus)
 
 
 def build_output_row(
@@ -232,6 +374,9 @@ def build_output_row(
         "matched_query_count": int(candidate.get("matched_query_count", 1)),
         "retrieval_sources": list(candidate.get("retrieval_sources", ["raw"])),
         "retrieval_score": round(float(candidate.get("retrieval_score", candidate.get("score", 0.0))), 6),
+        "llm_selection_reasons": list(candidate.get("llm_selection_reasons", [])),
+        "llm_selection_reason": str(candidate.get("llm_selection_reason", "")),
+        "llm_selection_forced_replacement": bool(candidate.get("llm_selection_forced_replacement", False)),
         "selected_for_llm": selected_for_llm,
         "novel_id": str(candidate.get("novel_id", "")),
         "title_guess": str(candidate.get("title_guess", "")),
@@ -264,6 +409,7 @@ def rerank_candidates_with_llm(
     use_cache: bool = True,
     cache_path: Path = CACHE_PATH,
     llm_model: str = "",
+    debug_target_title: str | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[dict[str, Any]], TimingSummary]:
     """Rerank semantic candidates with budgeted local LLM analysis, cache, and timing."""
@@ -272,7 +418,8 @@ def rerank_candidates_with_llm(
     weights = weights or RankingWeights()
     profile_lookup = profile_lookup or {}
     selected_count, _ = resolve_llm_candidate_k(len(candidates), llm_candidate_k) if candidates else (0, None)
-    selected_ids = {str(candidate.get("novel_id", idx)) for idx, candidate in enumerate(candidates[:selected_count])}
+    selected_candidates = select_llm_candidates(candidates, selected_count, debug_target_title=debug_target_title) if selected_count else []
+    selected_by_id = {candidate_key(candidate, fallback=idx): candidate for idx, candidate in enumerate(selected_candidates)}
     normalized = normalize_semantic_scores(candidates)
     cache = load_llm_cache(cache_path) if use_cache else {}
     rows: list[dict[str, Any]] = []
@@ -282,18 +429,20 @@ def rerank_candidates_with_llm(
 
     for idx, candidate in enumerate(candidates):
         novel_id = str(candidate.get("novel_id", idx))
+        selection_key = candidate_key(candidate, fallback=idx)
+        candidate_for_output = selected_by_id.get(selection_key, candidate)
         profile_text = profile_lookup.get(novel_id) or str(candidate.get("profile_text_preview", ""))
         normalized_score = normalized.get(novel_id, 0.0)
 
-        if novel_id not in selected_ids:
+        if selection_key not in selected_by_id:
             rows.append(
                 build_output_row(
-                    candidate=candidate,
+                    candidate=candidate_for_output,
                     normalized_semantic_score=normalized_score,
                     selected_for_llm=False,
                     analysis_provider="semantic_fallback",
                     cache_hit=False,
-                    final_score=semantic_fallback_score(normalized_score),
+                    final_score=semantic_fallback_score(normalized_score, int(candidate.get("matched_query_count", 1))),
                     match=None,
                     risk_penalty=0.0,
                     profile_text=profile_text,
@@ -311,7 +460,7 @@ def rerank_candidates_with_llm(
             provider=getattr(matcher, "provider", "unknown"),
             llm_profile_max_chars=llm_profile_max_chars,
         )
-        title = str(candidate.get("title_guess", ""))
+        title = str(candidate_for_output.get("title_guess", ""))
         cached = cache.get(cache_key)
 
         if cached:
@@ -347,7 +496,7 @@ def rerank_candidates_with_llm(
                 )
             item_started = time.perf_counter()
             try:
-                match = matcher.score(query=query, candidate=candidate, profile_text=truncated_profile, max_profile_chars=llm_profile_max_chars)
+                match = matcher.score(query=query, candidate=candidate_for_output, profile_text=truncated_profile, max_profile_chars=llm_profile_max_chars)
                 provider = getattr(matcher, "provider", "transformers")
             except Exception as exc:  # pragma: no cover - defensive runtime fallback
                 match = LLMMatchResult(
@@ -384,7 +533,7 @@ def rerank_candidates_with_llm(
         final_score = llm_final_score(normalized_score, match, risk_penalty, weights)
         rows.append(
             build_output_row(
-                candidate=candidate,
+                candidate=candidate_for_output,
                 normalized_semantic_score=normalized_score,
                 selected_for_llm=True,
                 analysis_provider=provider,

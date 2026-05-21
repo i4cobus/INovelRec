@@ -103,6 +103,8 @@ def print_debug_target(title: str, candidates: list[dict], recommendations: list
     console.print(f"- merged candidate pool: {'yes' if status['in_merged_pool'] else 'no'}")
     console.print(f"- LLM-selected pool: {'yes' if status['in_llm_selected_pool'] else 'no'}")
     console.print(f"- final top-{top_k}: {'yes' if status['in_final_top_k'] else 'no'}")
+    if recommendations is not None and status["in_merged_pool"] and not status["in_llm_selected_pool"]:
+        console.print("- not selected for LLM: candidate did not fit the diversified LLM selection budget.")
     found = status.get("final") or status.get("llm_selected") or status.get("merged")
     if found:
         console.print(
@@ -112,8 +114,11 @@ def print_debug_target(title: str, candidates: list[dict], recommendations: list
             f"matched_query_count={found.get('matched_query_count', '-')}, "
             f"retrieval_sources={found.get('retrieval_sources', '-')}, "
             f"semantic_score={found.get('semantic_score', found.get('best_semantic_score', '-'))}, "
-            f"final_score={found.get('final_score', '-')}"
+            f"final_score={found.get('final_score', '-')}, "
+            f"llm_selection_reasons={found.get('llm_selection_reasons', '-')}"
         )
+        if found.get("llm_selection_forced_replacement"):
+            console.print("[yellow]Warning:[/yellow] debug target was force-included by replacing the lowest-priority selected candidate.")
 
 
 def print_timing_summary(timing: TimingSummary) -> None:
@@ -235,6 +240,7 @@ def main(
         use_cache=use_cache,
         cache_path=cache_path,
         llm_model=llm_model,
+        debug_target_title=debug_target_title,
         progress_callback=progress_printer,
     )
     if debug_target_title:
@@ -254,6 +260,7 @@ def main(
     table.add_column("Queries", justify="right")
     table.add_column("Sources")
     table.add_column("LLM?", justify="center")
+    table.add_column("LLM Select Reasons", overflow="fold")
     table.add_column("Title", overflow="fold")
     table.add_column("Semantic", justify="right")
     table.add_column("LLM", justify="right")
@@ -268,6 +275,7 @@ def main(
             str(item["matched_query_count"]),
             ",".join(item["retrieval_sources"]),
             "Y" if item["selected_for_llm"] else "N",
+            ",".join(item.get("llm_selection_reasons", [])) or "-",
             str(item["title_guess"]),
             f"{item['semantic_score']:.4f}",
             "-" if item["llm_match_score"] is None else f"{item['llm_match_score']:.2f}",

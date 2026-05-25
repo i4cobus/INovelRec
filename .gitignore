@@ -10,5 +10,5 @@ reports/
 eval/results/
 eval/manual_judgements.csv
 docs/prompt*.md
-uv.lock
+docs/pre_interview.md
 streamlit.out.log

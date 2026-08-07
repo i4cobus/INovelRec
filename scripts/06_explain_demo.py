@@ -11,8 +11,8 @@ from rich.console import Console
 
 from src.embed import DEFAULT_EMBEDDING_MODEL, load_embedding_model
 from src.explain import ExplanationProgressEvent, explain_recommendations, save_report
-from src.llm_explain import TransformersExplanationGenerator
-from src.llm_matcher import DEFAULT_LLM_MODEL, create_transformers_matcher
+from src.backends import as_explanation_generator, backend_uses_gpu, create_matcher
+from src.llm_matcher import DEFAULT_LLM_MODEL
 from src.preferences import parse_preference_query
 from src.query_expansion import build_expanded_queries
 from src.rank import CACHE_PATH, load_profile_text_lookup, rerank_candidates_with_llm, resolve_llm_candidate_k
@@ -36,9 +36,11 @@ def resolve_device(device: str) -> str | None:
     return normalized
 
 
-def clear_cuda_if_needed(device: str | None) -> None:
+def clear_cuda_if_needed(device: str | None, backend: str = "transformers") -> None:
+    """Free VRAM between stages. A no-op for backends that hold no local weights."""
+
     gc.collect()
-    if device == "cuda":
+    if backend_uses_gpu(backend) and device == "cuda":
         try:
             import torch
 
@@ -62,11 +64,15 @@ def main(
     query: str = typer.Argument(..., help="Chinese preference query."),
     candidate_k: int = typer.Option(200, help="Number of merged candidates kept after multi-query retrieval."),
     top_k_per_query: int = typer.Option(100, help="FAISS results fetched per expanded query."),
-    llm_candidate_k: int | None = typer.Option(None, help="Number of candidates sent to the local LLM reranker."),
+    llm_candidate_k: int | None = typer.Option(None, help="Number of candidates sent to the local LLM reranker. Use 0 to score every candidate."),
+    fallback_policy: str = typer.Option("impute", help="Scoring for candidates the LLM never saw: impute or legacy_semantic."),
     top_k: int = typer.Option(5, help="Number of final recommendations to explain."),
     embedding_model: str = typer.Option(DEFAULT_EMBEDDING_MODEL, help="SentenceTransformer embedding model."),
     llm_model: str = typer.Option(DEFAULT_LLM_MODEL, help="Transformers local Qwen model."),
     device: str = typer.Option("auto", help="Torch device: auto, cuda, or cpu."),
+    backend: str = typer.Option("transformers", help="LLM backend: transformers (in-process) or http (OpenAI-compatible endpoint)."),
+    llm_base_url: str | None = typer.Option(None, help="Base URL for the http backend, e.g. http://127.0.0.1:8000/v1. Env: INOVELREC_LLM_BASE_URL."),
+    llm_max_workers: int | None = typer.Option(None, help="Concurrent requests for the http backend."),
     explanation_profile_max_chars: int = typer.Option(1200, help="Max profile chars included in explanation prompt."),
     llm_profile_max_chars: int = typer.Option(1200, help="Max profile chars included in Stage 4 reranking prompt."),
     output_format: str = typer.Option("text", help="Output format: text, markdown, or json."),
@@ -92,7 +98,7 @@ def main(
 
     expansion_provider = None
     if use_query_expansion:
-        expansion_provider = create_transformers_matcher(model_name=llm_model, device=resolved_device, max_new_tokens=256)
+        expansion_provider = create_matcher(backend=backend, model_name=llm_model, device=resolved_device, max_new_tokens=256, base_url=llm_base_url, max_workers=llm_max_workers)
     expanded_queries = build_expanded_queries(
         raw_query=query,
         structured_preference=parse_preference_query(query),
@@ -103,7 +109,7 @@ def main(
     )
     if expansion_provider is not None:
         del expansion_provider
-        clear_cuda_if_needed(resolved_device)
+        clear_cuda_if_needed(resolved_device, backend)
 
     embedder = load_embedding_model(embedding_model, device=resolved_device)
     candidates = multi_query_semantic_search(
@@ -115,10 +121,10 @@ def main(
         final_candidate_k=candidate_k,
     )
     del embedder
-    clear_cuda_if_needed(resolved_device)
+    clear_cuda_if_needed(resolved_device, backend)
 
     profile_lookup = load_profile_text_lookup(profiles)
-    matcher = create_transformers_matcher(model_name=llm_model, device=resolved_device, max_new_tokens=256)
+    matcher = create_matcher(backend=backend, model_name=llm_model, device=resolved_device, max_new_tokens=256, base_url=llm_base_url, max_workers=llm_max_workers)
     ranked, _ = rerank_candidates_with_llm(
         query=query,
         candidates=candidates,
@@ -129,9 +135,10 @@ def main(
         use_cache=use_cache,
         cache_path=cache_path,
         llm_model=llm_model,
+        fallback_policy=fallback_policy,
     )
 
-    generator = TransformersExplanationGenerator(matcher)
+    generator = as_explanation_generator(matcher)
     final_candidates = ranked[:top_k]
     explanations, summary = explain_recommendations(
         query=query,

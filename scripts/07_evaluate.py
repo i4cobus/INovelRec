@@ -13,7 +13,8 @@ from rich.table import Table
 from src.app_pipeline import resolve_device
 from src.embed import DEFAULT_EMBEDDING_MODEL, load_embedding_model
 from src.evaluation import EvalQuery, compute_anchor_metrics, load_eval_queries, write_eval_outputs
-from src.llm_matcher import DEFAULT_LLM_MODEL, create_transformers_matcher
+from src.backends import create_matcher
+from src.llm_matcher import DEFAULT_LLM_MODEL
 from src.preferences import parse_preference_query
 from src.query_expansion import ExpandedQuery, build_expanded_queries
 from src.rank import load_profile_text_lookup, rerank_candidates_with_llm, resolve_llm_candidate_k
@@ -68,6 +69,7 @@ def run_full(
     top_k_per_query: int,
     llm_candidate_k: int,
     llm_model: str,
+    fallback_policy: str,
 ) -> list[dict[str, Any]]:
     """Run query expansion, multi-query retrieval, and local LLM reranking."""
 
@@ -95,6 +97,7 @@ def run_full(
         llm_candidate_k=resolved_llm_k,
         profile_lookup=profile_lookup,
         llm_model=llm_model,
+        fallback_policy=fallback_policy,
     )
     return ranked
 
@@ -127,7 +130,8 @@ def main(
     out_dir: Path = typer.Option(Path("eval/results"), help="Directory for CSV/JSONL result outputs."),
     top_k: int = typer.Option(10, help="Top-k results saved per query and variant."),
     candidate_k: int = typer.Option(100, help="Full-system candidate pool size."),
-    llm_candidate_k: int = typer.Option(10, help="Number of candidates sent to the local LLM in full mode."),
+    llm_candidate_k: int = typer.Option(10, help="Number of candidates sent to the local LLM in full mode. Use 0 to score every candidate."),
+    fallback_policy: str = typer.Option("impute", help="Scoring for candidates the LLM never saw: impute or legacy_semantic."),
     top_k_per_query: int = typer.Option(100, help="FAISS results per expanded query in full mode."),
     embedding_model: str = typer.Option(DEFAULT_EMBEDDING_MODEL, help="SentenceTransformer embedding model."),
     llm_model: str = typer.Option(DEFAULT_LLM_MODEL, help="Local Qwen LLM model."),
@@ -135,6 +139,9 @@ def main(
     id_map: Path = typer.Option(DEFAULT_ID_MAP_PATH, help="Novel id map path."),
     profiles: Path = typer.Option(DEFAULT_PROFILES_PATH, help="Novel profiles parquet path."),
     device: str = typer.Option("auto", help="Torch device: auto, cuda, or cpu."),
+    backend: str = typer.Option("transformers", help="LLM backend: transformers (in-process) or http (OpenAI-compatible endpoint)."),
+    llm_base_url: str | None = typer.Option(None, help="Base URL for the http backend, e.g. http://127.0.0.1:8000/v1. Env: INOVELREC_LLM_BASE_URL."),
+    llm_max_workers: int | None = typer.Option(None, help="Concurrent requests for the http backend."),
     mode: str = typer.Option("baseline", help="Evaluation mode: baseline, full, or both."),
     skip_llm: bool = typer.Option(False, help="Skip full LLM mode and run baseline only."),
 ) -> None:
@@ -144,6 +151,8 @@ def main(
         raise typer.BadParameter("top-k and candidate-k must be positive")
     if mode not in {"baseline", "full", "both"}:
         raise typer.BadParameter("mode must be baseline, full, or both")
+    if fallback_policy not in {"impute", "legacy_semantic"}:
+        raise typer.BadParameter("fallback-policy must be impute or legacy_semantic")
     if skip_llm:
         mode = "baseline"
 
@@ -157,7 +166,7 @@ def main(
     matcher = None
     profile_lookup: dict[str, str] = {}
     if mode in {"full", "both"}:
-        matcher = create_transformers_matcher(model_name=llm_model, device=resolved_device, max_new_tokens=256)
+        matcher = create_matcher(backend=backend, model_name=llm_model, device=resolved_device, max_new_tokens=256, base_url=llm_base_url, max_workers=llm_max_workers)
         profile_lookup = load_profile_text_lookup(profiles)
 
     rows: list[dict[str, Any]] = []
@@ -179,6 +188,7 @@ def main(
                 top_k_per_query=top_k_per_query,
                 llm_candidate_k=llm_candidate_k,
                 llm_model=llm_model,
+                fallback_policy=fallback_policy,
             )
             rows.extend(result_row(query, "full_llm_rerank", rank, item) for rank, item in enumerate(full[:top_k], start=1))
 

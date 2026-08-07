@@ -25,7 +25,8 @@ import streamlit as st
 
 from src.app_pipeline import PipelineResult, PipelineSettings, load_profiles_for_app, run_discovery_pipeline, validate_runtime_files
 from src.embed import DEFAULT_EMBEDDING_MODEL, load_embedding_model
-from src.llm_matcher import DEFAULT_LLM_MODEL, create_transformers_matcher
+from src.backends import BACKENDS, DEFAULT_BACKEND, create_matcher
+from src.llm_matcher import DEFAULT_LLM_MODEL
 from src.search import load_faiss_index, load_id_map
 from src.vector_index import DEFAULT_ID_MAP_PATH, DEFAULT_INDEX_PATH, DEFAULT_PROFILES_PATH
 
@@ -45,8 +46,14 @@ def cached_embedding_model(model_name: str, device: str):
 
 
 @st.cache_resource(show_spinner="Loading local Qwen LLM...")
-def cached_llm_matcher(model_name: str, device: str):
-    return create_transformers_matcher(model_name=model_name, device=None if device == "auto" else device, max_new_tokens=256)
+def cached_llm_matcher(model_name: str, device: str, backend: str = DEFAULT_BACKEND, base_url: str | None = None):
+    return create_matcher(
+        backend=backend,
+        model_name=model_name,
+        device=None if device == "auto" else device,
+        max_new_tokens=256,
+        base_url=base_url,
+    )
 
 
 @st.cache_resource(show_spinner="Loading FAISS index...")
@@ -162,6 +169,8 @@ def main() -> None:
         st.header("Advanced Settings")
         embedding_model = st.text_input("Embedding model", DEFAULT_EMBEDDING_MODEL)
         llm_model = st.text_input("LLM model", DEFAULT_LLM_MODEL)
+        backend = st.selectbox("LLM backend", list(BACKENDS), index=list(BACKENDS).index(DEFAULT_BACKEND))
+        llm_base_url = st.text_input("HTTP base URL", "", help="Only used by the http backend, e.g. http://127.0.0.1:8000/v1") or None
         device = st.selectbox("Device", ["auto", "cuda", "cpu"], index=0)
         explanation_profile_max_chars = st.number_input("Explanation profile max chars", min_value=300, max_value=4000, value=1200, step=100)
         llm_profile_max_chars = st.number_input("Rerank profile max chars", min_value=300, max_value=4000, value=1200, step=100)
@@ -197,6 +206,8 @@ def main() -> None:
         top_k=int(top_k),
         embedding_model=embedding_model,
         llm_model=llm_model,
+        backend=backend,
+        llm_base_url=llm_base_url,
         device=device,
         explanation_profile_max_chars=int(explanation_profile_max_chars),
         llm_profile_max_chars=int(llm_profile_max_chars),
@@ -229,7 +240,7 @@ def main() -> None:
         with status:
             progress_callback("load", "Loading cached models, index, id map, and profiles.", 0.02)
             embedder = cached_embedding_model(settings.embedding_model, settings.device)
-            matcher = cached_llm_matcher(settings.llm_model, settings.device)
+            matcher = cached_llm_matcher(settings.llm_model, settings.device, settings.backend, settings.llm_base_url)
             index = cached_faiss_index(str(settings.index_path))
             id_map = cached_id_map(str(settings.id_map_path))
             profile_lookup = cached_profiles(str(settings.profiles_path))

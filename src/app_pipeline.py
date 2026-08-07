@@ -7,13 +7,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from src.backends import DEFAULT_BACKEND, as_explanation_generator
 from src.embed import DEFAULT_EMBEDDING_MODEL, SupportsEncode
 from src.explain import ExplanationProgressEvent, RecommendationExplanation, explain_recommendations
-from src.llm_explain import TransformersExplanationGenerator
 from src.llm_matcher import DEFAULT_LLM_MODEL
 from src.preferences import parse_preference_query
 from src.query_expansion import ExpandedQuery, build_expanded_queries, expansion_summary_by_source
-from src.rank import CACHE_PATH, LLMProgressEvent, load_profile_text_lookup, rerank_candidates_with_llm, resolve_llm_candidate_k
+from src.rank import (
+    CACHE_PATH,
+    DEFAULT_FALLBACK_POLICY,
+    FallbackPolicy,
+    LLMProgressEvent,
+    load_profile_text_lookup,
+    rerank_candidates_with_llm,
+    resolve_llm_candidate_k,
+)
 from src.report import format_report
 from src.search import multi_query_semantic_search
 from src.vector_index import DEFAULT_ID_MAP_PATH, DEFAULT_INDEX_PATH, DEFAULT_PROFILES_PATH
@@ -29,6 +37,9 @@ class PipelineSettings:
     top_k: int = 5
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
     llm_model: str = DEFAULT_LLM_MODEL
+    backend: str = DEFAULT_BACKEND
+    llm_base_url: str | None = None
+    llm_max_workers: int | None = None
     device: str = "auto"
     explanation_profile_max_chars: int = 1200
     llm_profile_max_chars: int = 1200
@@ -36,6 +47,7 @@ class PipelineSettings:
     use_domain_hints: bool = True
     max_expanded_queries: int = 5
     use_cache: bool = True
+    fallback_policy: FallbackPolicy = DEFAULT_FALLBACK_POLICY
     cache_path: Path = CACHE_PATH
     index_path: Path = DEFAULT_INDEX_PATH
     id_map_path: Path = DEFAULT_ID_MAP_PATH
@@ -208,12 +220,13 @@ def run_discovery_pipeline(
         cache_path=settings.cache_path,
         llm_model=settings.llm_model,
         progress_callback=rerank_progress,
+        fallback_policy=settings.fallback_policy,
     )
     timing["llm_reranking"] = time.perf_counter() - stage_started
     timing["rerank_cache_hits"] = float(rerank_timing.cache_hits)
     timing["rerank_cache_misses"] = float(rerank_timing.cache_misses)
 
-    generator = TransformersExplanationGenerator(matcher)
+    generator = as_explanation_generator(matcher)
     final_candidates = ranked[: settings.top_k]
 
     def explanation_progress(event: ExplanationProgressEvent) -> None:

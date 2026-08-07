@@ -190,3 +190,109 @@ def write_manual_judgement_template(path: Path) -> None:
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(columns)
+
+
+def confusion_counts(rater_a: list[int], rater_b: list[int], categories: list[int]) -> dict[tuple[int, int], int]:
+    """Count co-occurrences of two raters' labels."""
+
+    index = {category: position for position, category in enumerate(categories)}
+    counts: dict[tuple[int, int], int] = {}
+    for left, right in zip(rater_a, rater_b, strict=True):
+        if left not in index or right not in index:
+            raise ValueError(f"Label outside declared categories {categories}: {left}, {right}")
+        key = (left, right)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def cohen_kappa(
+    rater_a: list[int],
+    rater_b: list[int],
+    categories: list[int] | None = None,
+    weighted: bool = False,
+) -> float:
+    """Cohen's kappa, optionally with linear weights for ordinal labels.
+
+    Use ``weighted=True`` for the 0/1/2 relevance scale, where confusing 0 with 1
+    is a smaller error than confusing 0 with 2. Use the unweighted form for the
+    binary constraint-violation flag.
+    """
+
+    if len(rater_a) != len(rater_b):
+        raise ValueError("Raters must label the same number of items")
+    if not rater_a:
+        raise ValueError("Cannot compute kappa over an empty sample")
+
+    levels = sorted(set(categories if categories is not None else [*rater_a, *rater_b]))
+    if len(levels) < 2:
+        # Both raters used a single category: agreement is total but chance-corrected
+        # kappa is undefined. Report perfect agreement rather than dividing by zero.
+        return 1.0 if rater_a == rater_b else 0.0
+
+    total = len(rater_a)
+    observed = confusion_counts(rater_a, rater_b, levels)
+    marginal_a = {level: rater_a.count(level) / total for level in levels}
+    marginal_b = {level: rater_b.count(level) / total for level in levels}
+    span = len(levels) - 1
+
+    def weight(left: int, right: int) -> float:
+        if not weighted:
+            return 0.0 if left == right else 1.0
+        return abs(levels.index(left) - levels.index(right)) / span
+
+    numerator = sum(weight(left, right) * count / total for (left, right), count in observed.items())
+    denominator = sum(weight(left, right) * marginal_a[left] * marginal_b[right] for left in levels for right in levels)
+    if denominator == 0:
+        return 1.0 if numerator == 0 else 0.0
+    return 1.0 - (numerator / denominator)
+
+
+def interpret_kappa(kappa: float) -> str:
+    """Landis & Koch style bands, for reporting only."""
+
+    if kappa < 0.0:
+        return "worse than chance"
+    if kappa < 0.20:
+        return "slight"
+    if kappa < 0.40:
+        return "fair"
+    if kappa < 0.60:
+        return "moderate"
+    if kappa < 0.80:
+        return "substantial"
+    return "almost perfect"
+
+
+def judge_human_agreement(merged: pd.DataFrame) -> dict[str, Any]:
+    """Compare judge and human columns on the rows both have labelled.
+
+    Expects ``relevance_label`` / ``constraint_violation`` (human) alongside
+    ``judge_relevance_label`` / ``judge_constraint_violation``.
+    """
+
+    required = {"relevance_label", "constraint_violation", "judge_relevance_label", "judge_constraint_violation"}
+    missing = required.difference(merged.columns)
+    if missing:
+        raise ValueError(f"Missing agreement columns: {sorted(missing)}")
+
+    paired = merged.dropna(subset=list(required))
+    if paired.empty:
+        raise ValueError("No rows carry both human and judge labels")
+
+    human_relevance = [int(value) for value in paired["relevance_label"]]
+    judge_relevance = [int(value) for value in paired["judge_relevance_label"]]
+    human_violation = [int(bool(value)) for value in paired["constraint_violation"]]
+    judge_violation = [int(bool(value)) for value in paired["judge_constraint_violation"]]
+
+    relevance_kappa = cohen_kappa(human_relevance, judge_relevance, categories=[0, 1, 2], weighted=True)
+    violation_kappa = cohen_kappa(human_violation, judge_violation, categories=[0, 1])
+    exact = sum(1 for left, right in zip(human_relevance, judge_relevance, strict=True) if left == right)
+
+    return {
+        "paired_items": int(len(paired)),
+        "relevance_weighted_kappa": round(relevance_kappa, 4),
+        "relevance_kappa_band": interpret_kappa(relevance_kappa),
+        "relevance_exact_agreement": round(exact / len(paired), 4),
+        "constraint_violation_kappa": round(violation_kappa, 4),
+        "constraint_violation_kappa_band": interpret_kappa(violation_kappa),
+    }

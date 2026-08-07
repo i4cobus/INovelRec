@@ -6,6 +6,9 @@ data/
 reports/
 eval/results/
 eval/manual_judgements.csv
+# Annotation sheets inline raw novel excerpts from the private corpus.
+eval/manual_judgements_sheet.csv
+eval/*_sheet.csv
 docs/prompt*.md
 docs/pre_interview.md
 streamlit.out.log

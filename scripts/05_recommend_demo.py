@@ -11,7 +11,8 @@ from rich.console import Console
 from rich.table import Table
 
 from src.embed import DEFAULT_EMBEDDING_MODEL, load_embedding_model
-from src.llm_matcher import DEFAULT_LLM_MODEL, create_transformers_matcher
+from src.backends import backend_uses_gpu, create_matcher
+from src.llm_matcher import DEFAULT_LLM_MODEL
 from src.preferences import parse_preference_query
 from src.query_expansion import build_expanded_queries, expansion_summary_by_source
 from src.rank import (
@@ -41,9 +42,11 @@ def resolve_device(device: str) -> str | None:
     return normalized
 
 
-def clear_cuda_if_needed(device: str | None) -> None:
+def clear_cuda_if_needed(device: str | None, backend: str = "transformers") -> None:
+    """Free VRAM between stages. A no-op for backends that hold no local weights."""
+
     gc.collect()
-    if device == "cuda":
+    if backend_uses_gpu(backend) and device == "cuda":
         try:
             import torch
 
@@ -154,7 +157,8 @@ def main(
     llm_max_new_tokens: int = typer.Option(256, help="Maximum tokens for each local LLM JSON scoring response."),
     candidate_k: int = typer.Option(200, help="Number of merged candidates kept after multi-query retrieval."),
     top_k_per_query: int = typer.Option(100, help="FAISS results fetched per expanded query."),
-    llm_candidate_k: int | None = typer.Option(None, help="Number of candidates sent to the local LLM."),
+    llm_candidate_k: int | None = typer.Option(None, help="Number of candidates sent to the local LLM. Use 0 to score every candidate."),
+    fallback_policy: str = typer.Option("impute", help="Scoring for candidates the LLM never saw: impute or legacy_semantic."),
     llm_profile_max_chars: int = typer.Option(1200, help="Maximum profile characters sent to the local LLM."),
     top_k: int = typer.Option(10, help="Number of final recommendations to show."),
     use_query_expansion: bool = typer.Option(True, "--use-query-expansion/--no-query-expansion", help="Use local LLM query expansion."),
@@ -164,6 +168,9 @@ def main(
     use_cache: bool = typer.Option(True, "--use-cache/--no-cache", help="Reuse cached local LLM candidate analysis."),
     cache_path: Path = typer.Option(CACHE_PATH, help="LLM rerank cache JSONL path."),
     device: str = typer.Option("auto", help="Torch device: auto, cuda, or cpu."),
+    backend: str = typer.Option("transformers", help="LLM backend: transformers (in-process) or http (OpenAI-compatible endpoint)."),
+    llm_base_url: str | None = typer.Option(None, help="Base URL for the http backend, e.g. http://127.0.0.1:8000/v1. Env: INOVELREC_LLM_BASE_URL."),
+    llm_max_workers: int | None = typer.Option(None, help="Concurrent requests for the http backend."),
 ) -> None:
     """Retrieve semantic candidates with expansion, then rerank them with a transformers local LLM."""
 
@@ -183,10 +190,13 @@ def main(
 
     expansion_provider = None
     if use_query_expansion:
-        expansion_provider = create_transformers_matcher(
+        expansion_provider = create_matcher(
+            backend=backend,
             model_name=llm_model,
             device=resolved_device,
             max_new_tokens=llm_max_new_tokens,
+            base_url=llm_base_url,
+            max_workers=llm_max_workers,
         )
     expanded_queries = build_expanded_queries(
         raw_query=query,
@@ -199,7 +209,7 @@ def main(
     print_expanded_queries(expanded_queries)
     if expansion_provider is not None:
         del expansion_provider
-        clear_cuda_if_needed(resolved_device)
+        clear_cuda_if_needed(resolved_device, backend)
 
     retrieval_started = time.perf_counter()
     embedding_model = load_embedding_model(model, device=resolved_device)
@@ -219,16 +229,19 @@ def main(
         print_debug_target(debug_target_title, candidates, None, top_k=top_k)
 
     del embedding_model
-    clear_cuda_if_needed(resolved_device)
+    clear_cuda_if_needed(resolved_device, backend)
 
     profile_started = time.perf_counter()
     profile_lookup = load_profile_text_lookup(profiles)
     load_profiles = time.perf_counter() - profile_started
 
-    matcher = create_transformers_matcher(
+    matcher = create_matcher(
+        backend=backend,
         model_name=llm_model,
         device=resolved_device,
         max_new_tokens=llm_max_new_tokens,
+        base_url=llm_base_url,
+        max_workers=llm_max_workers,
     )
     recommendations, timing = rerank_candidates_with_llm(
         query=query,
@@ -242,6 +255,7 @@ def main(
         llm_model=llm_model,
         debug_target_title=debug_target_title,
         progress_callback=progress_printer,
+            fallback_policy=fallback_policy,
     )
     if debug_target_title:
         print_debug_target(debug_target_title, candidates, recommendations, top_k=top_k)

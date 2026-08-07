@@ -9,7 +9,14 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from src.embed import DEFAULT_EMBEDDING_MODEL, encode_texts, load_embedding_model
+from src.embed import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_EMBEDDING_MODEL,
+    close_encode_pool,
+    encode_documents,
+    load_embedding_model,
+    open_encode_pool,
+)
 from src.vector_index import (
     DEFAULT_ID_MAP_PATH,
     DEFAULT_INDEX_METADATA_PATH,
@@ -37,7 +44,9 @@ def main(
     metadata_out: Path = typer.Option(DEFAULT_INDEX_METADATA_PATH, help="Output index metadata JSON path."),
     model: str = typer.Option(DEFAULT_EMBEDDING_MODEL, help="SentenceTransformer model name."),
     device: str | None = typer.Option(None, help="Optional torch device, for example cuda or cpu."),
-    batch_size: int = typer.Option(32, help="Embedding batch size."),
+    batch_size: int = typer.Option(DEFAULT_BATCH_SIZE, help="Embedding batch size per device."),
+    multi_gpu: bool = typer.Option(False, "--multi-gpu/--single-gpu", help="Shard encoding across all visible CUDA devices."),
+    chunk_size: int | None = typer.Option(None, help="Rows dispatched per multi-GPU worker task."),
     limit: int | None = typer.Option(None, help="Maximum number of profile rows to process."),
     overwrite: bool = typer.Option(False, help="Overwrite existing output files."),
 ) -> None:
@@ -55,7 +64,19 @@ def main(
     console.print(f"Skipped profiles: {loaded.skipped_rows}")
 
     embedding_model = load_embedding_model(model, device=device)
-    embeddings = encode_texts(embedding_model, texts, batch_size=batch_size, normalize_embeddings=True)
+    pool = open_encode_pool(embedding_model) if multi_gpu else None
+    try:
+        embeddings = encode_documents(
+            embedding_model,
+            texts,
+            batch_size=batch_size,
+            normalize_embeddings=True,
+            pool=pool,
+            chunk_size=chunk_size,
+        )
+    finally:
+        if pool is not None:
+            close_encode_pool(embedding_model, pool)
     index = build_faiss_index(embeddings)
     id_map = make_id_map(loaded.dataframe)
     metadata = make_index_metadata(
@@ -78,6 +99,8 @@ def main(
     summary.add_row("Profiles skipped", str(loaded.skipped_rows))
     summary.add_row("Embedding shape", str(tuple(embeddings.shape)))
     summary.add_row("Device", device or "auto")
+    summary.add_row("Batch size", str(batch_size))
+    summary.add_row("Multi-GPU", "yes" if multi_gpu else "no")
     summary.add_row("FAISS index size", str(index.ntotal))
     summary.add_row("Index output", str(index_out))
     summary.add_row("ID map output", str(id_map_out))

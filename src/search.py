@@ -7,7 +7,7 @@ from pathlib import Path
 import faiss
 import numpy as np
 
-from src.embed import SupportsEncode, encode_texts
+from src.embed import SupportsEncode, encode_queries
 from src.query_expansion import ExpandedQuery
 from src.vector_index import load_faiss_index, load_id_map
 
@@ -29,7 +29,7 @@ def semantic_search(
     if index.ntotal == 0:
         return []
 
-    query_embedding = encode_texts(model, [query], batch_size=1, normalize_embeddings=True)
+    query_embedding = encode_queries(model, [query], batch_size=1, normalize_embeddings=True)
     if query_embedding.shape[1] != index.d:
         raise ValueError(f"Query dim {query_embedding.shape[1]} does not match index dim {index.d}")
 

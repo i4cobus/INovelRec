@@ -117,6 +117,24 @@ def parse_llm_match_result(text: str) -> LLMMatchResult:
     return LLMMatchResult.from_dict(extract_json_object(text))
 
 
+def resolve_single_device(device: str | None) -> str:
+    """Resolve a concrete single-device string, never accelerate's ``"auto"``.
+
+    ``device_map="auto"`` shards a model layer-by-layer across every visible GPU.
+    On a multi-GPU host that turns a model small enough for one card into an
+    8-stage pipeline that ships activations over the interconnect on every
+    forward pass — slower than running it on a single card. Always pin.
+    """
+
+    normalized = (device or "").strip().lower()
+    if normalized and normalized != "auto":
+        return normalized
+
+    import torch
+
+    return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
 class TransformersMatcher:
     """Local Hugging Face/Qwen Instruct matcher loaded once and reused."""
 
@@ -130,11 +148,12 @@ class TransformersMatcher:
     ) -> None:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        self.device = resolve_single_device(device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype="auto",
-            device_map=device or "auto",
+            dtype="auto",
+            device_map={"": self.device},
             trust_remote_code=True,
         )
         self.max_new_tokens = max_new_tokens

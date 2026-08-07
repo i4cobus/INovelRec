@@ -17,11 +17,15 @@ dependencies = [
   "transformers>=4.51.0",
   "accelerate>=1.0.0",
   "faiss-cpu>=1.8.0",
-  "torch>=2.12.0",
+  # Capped by the cu128 index (host driver 570.124.06 / CUDA 12.8), which tops out at 2.11.0.
+  "torch>=2.11.0",
   "tqdm>=4.66.0",
   "typer>=0.12.3",
   "pytest>=8.2.0",
   "huggingface-hub>=1.15.0",
+  # Declared explicitly: src/http_matcher.py talks to OpenAI-compatible endpoints
+  # (locally served vLLM, or a hosted gateway) instead of importing vllm here.
+  "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]
@@ -42,7 +46,15 @@ name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
+# Linux host driver is 570.124.06 (CUDA 12.8). The PyPI default torch wheel is now
+# built against CUDA 13.0 and reports cuda.is_available() == False here, so pin cu128.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [tool.uv.sources]
 torch = [
   { index = "pytorch-cu126", marker = "platform_system == 'Windows'" },
+  { index = "pytorch-cu128", marker = "platform_system == 'Linux'" },
 ]

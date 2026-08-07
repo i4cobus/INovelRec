@@ -8,7 +8,7 @@ import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 import pandas as pd
 
@@ -18,6 +18,28 @@ from src.vector_index import DEFAULT_PROFILES_PATH
 
 CACHE_PATH = DATA_DIR / "cache" / "llm_rerank_cache.jsonl"
 BOILERPLATE_PATTERNS = ("知轩藏书", "zxcs", "www.zxcs", "精校小说下载", "更多精校小说")
+
+# Legacy LLM budget from the single-GPU era, where one candidate cost ~8.8s. Pass
+# LLM_CANDIDATE_K_ALL to score every candidate once a batching backend is available.
+DEFAULT_LLM_CANDIDATE_K = 10
+LLM_CANDIDATE_K_ALL = 0
+
+# How to score candidates the LLM never saw.
+#
+# "impute" keeps every candidate on ONE scale: unscored rows reuse the normal formula
+# with the LLM features filled in from the mean of the scored rows, i.e. treated as
+# average rather than bad.
+#
+# "legacy_semantic" reproduces the original two-formula behaviour, kept as an A/B
+# control. It is biased: its ceiling is 0.40 while the scored path's ceiling is 1.00,
+# so a candidate the LLM actively rated 0.1 can still outrank the best unscored
+# candidate. Being *selected* was worth up to 0.6 points independent of content.
+FallbackPolicy = Literal["impute", "legacy_semantic"]
+DEFAULT_FALLBACK_POLICY: FallbackPolicy = "impute"
+
+# Used only when nothing at all was scored, so there is no mean to impute from.
+PRIOR_LLM_MATCH_SCORE = 0.5
+PRIOR_CONFIDENCE_SCORE = confidence_to_score("low")
 
 
 class CandidateMatcher(Protocol):
@@ -51,6 +73,7 @@ class TimingSummary:
     provider: str = ""
     llm_model: str = ""
     llm_profile_max_chars: int = 1200
+    fallback_policy: str = ""
 
 
 @dataclass(frozen=True)
@@ -78,23 +101,73 @@ def candidate_key(candidate: dict[str, Any], fallback: int = 0) -> str:
 
 
 def normalize_semantic_scores(candidates: list[dict[str, Any]]) -> dict[str, float]:
-    """Normalize semantic scores to 0..1 across candidates."""
+    """Min-max normalize semantic scores to 0..1 across the candidate pool.
+
+    Always min-max, unconditionally. The previous version passed scores through
+    unchanged whenever every value already fell inside [0, 1] and only min-maxed
+    otherwise — so the function did two different things depending on whether the
+    pool happened to contain a negative cosine.
+
+    That mattered because it usually did nothing: cosine similarities over a
+    retrieved pool cluster in a narrow band (~0.64-0.72 is typical), so the
+    "already in range" branch fired almost every time and ``semantic_weight``'s
+    nominal 0.40 contributed only ~0.03 of actual score spread, while
+    ``llm_match_weight``'s 0.50 contributed its full range. Weights on paper were
+    not the weights doing the ranking. Use ``score_component_contributions`` to
+    check the effective split rather than trusting the constants.
+    """
 
     if not candidates:
         return {}
     scores = [float(candidate.get("score", 0.0)) for candidate in candidates]
-    if all(0.0 <= score <= 1.0 for score in scores):
-        return {
-            str(candidate.get("novel_id", idx)): score
-            for idx, (candidate, score) in enumerate(zip(candidates, scores, strict=False))
-        }
     min_score = min(scores)
     max_score = max(scores)
     if max_score == min_score:
+        # One distinct value: every candidate is equally (un)supported by semantics,
+        # so give them all the same score and let the other components decide.
         return {str(candidate.get("novel_id", idx)): 1.0 for idx, candidate in enumerate(candidates)}
+    span = max_score - min_score
     return {
-        str(candidate.get("novel_id", idx)): (float(candidate.get("score", 0.0)) - min_score) / (max_score - min_score)
-        for idx, candidate in enumerate(candidates)
+        str(candidate.get("novel_id", idx)): (score - min_score) / span
+        for idx, (candidate, score) in enumerate(zip(candidates, scores, strict=False))
+    }
+
+
+def score_component_contributions(rows: list[dict[str, Any]], weights: RankingWeights | None = None) -> dict[str, float]:
+    """Report how much each weighted component actually moves the final score.
+
+    Nominal weights describe intent; this describes behaviour. A component whose
+    inputs barely vary across the pool contributes almost nothing no matter how
+    large its weight, which is exactly how a reranker ends up decorative.
+    """
+
+    weights = weights or RankingWeights()
+    if not rows:
+        return {}
+
+    def spread(values: list[float]) -> float:
+        usable = [value for value in values if value is not None]
+        return (max(usable) - min(usable)) if usable else 0.0
+
+    semantic = spread([float(row.get("normalized_semantic_score", 0.0)) for row in rows])
+    llm = spread([row.get("llm_match_score") for row in rows if row.get("llm_match_score") is not None])
+    confidence = spread([row.get("confidence_score") for row in rows if row.get("confidence_score") is not None])
+    risk = spread([float(row.get("risk_penalty", 0.0)) for row in rows])
+
+    contributions = {
+        "semantic": weights.semantic_weight * semantic,
+        "llm_match": weights.llm_match_weight * llm,
+        "confidence": weights.confidence_weight * confidence,
+        "risk_penalty": risk,
+    }
+    total = sum(contributions.values())
+    if total <= 0:
+        return {**{key: round(value, 6) for key, value in contributions.items()}, "total_spread": 0.0}
+    shares = {f"{key}_share": round(value / total, 4) for key, value in contributions.items()}
+    return {
+        **{key: round(value, 6) for key, value in contributions.items()},
+        **shares,
+        "total_spread": round(total, 6),
     }
 
 
@@ -109,16 +182,104 @@ def load_profile_text_lookup(profiles_path: Path = DEFAULT_PROFILES_PATH) -> dic
 
 
 def resolve_llm_candidate_k(candidate_k: int, llm_candidate_k: int | None) -> tuple[int, str | None]:
-    """Resolve and clamp the number of candidates sent to the local LLM."""
+    """Resolve and clamp the number of candidates sent to the local LLM.
+
+    ``LLM_CANDIDATE_K_ALL`` (0) means "score every candidate", which removes the
+    unscored path entirely. That is only affordable with a batching backend.
+    """
 
     if candidate_k <= 0:
         raise ValueError("candidate_k must be positive")
-    resolved = min(10, candidate_k) if llm_candidate_k is None else llm_candidate_k
+    if llm_candidate_k is None:
+        resolved = min(DEFAULT_LLM_CANDIDATE_K, candidate_k)
+    elif llm_candidate_k == LLM_CANDIDATE_K_ALL:
+        return candidate_k, None
+    else:
+        resolved = llm_candidate_k
     if resolved <= 0:
-        raise ValueError("llm_candidate_k must be positive")
+        raise ValueError("llm_candidate_k must be positive, or LLM_CANDIDATE_K_ALL to score everything")
     if resolved > candidate_k:
         return candidate_k, f"llm-candidate-k {resolved} exceeds candidate-k {candidate_k}; clamped to {candidate_k}."
     return resolved, None
+
+
+@dataclass(frozen=True)
+class PendingScore:
+    """One cache-missed candidate awaiting an LLM call."""
+
+    selection_key: str
+    selected_index: int
+    candidate: dict[str, Any]
+    truncated_profile: str
+    cache_key: str
+    title: str
+    faiss_rank: int
+
+
+def score_pending(
+    *,
+    query: str,
+    pending: list[PendingScore],
+    matcher: CandidateMatcher,
+    llm_profile_max_chars: int,
+) -> list[LLMMatchResult | None]:
+    """Score cache-missed candidates, using a batching backend when one is offered.
+
+    ``None`` marks a request that never produced an answer, which the caller must
+    not cache. Matchers exposing ``score_many`` (see ``src/http_matcher.py``) run
+    the whole batch concurrently; everything else falls back to one call at a time.
+    """
+
+    batch_score = getattr(matcher, "score_many", None)
+    if callable(batch_score) and len(pending) > 1:
+        items = [(item.candidate, item.truncated_profile) for item in pending]
+        return list(batch_score(query, items, llm_profile_max_chars))
+
+    results: list[LLMMatchResult | None] = []
+    for item in pending:
+        try:
+            results.append(
+                matcher.score(
+                    query=query,
+                    candidate=item.candidate,
+                    profile_text=item.truncated_profile,
+                    max_profile_chars=llm_profile_max_chars,
+                )
+            )
+        except Exception:  # noqa: BLE001 - one dead candidate must not kill the run
+            results.append(None)
+    return results
+
+
+def impute_unscored_features(scored: list[LLMMatchResult]) -> tuple[float, float]:
+    """Estimate LLM features for candidates that never reached the model.
+
+    Returns the mean match score and confidence score of the candidates that were
+    scored, so an unscored candidate ranks as *average* rather than as bad. Falls
+    back to a neutral prior when nothing was scored.
+    """
+
+    if not scored:
+        return PRIOR_LLM_MATCH_SCORE, PRIOR_CONFIDENCE_SCORE
+    return (
+        sum(match.llm_match_score for match in scored) / len(scored),
+        sum(match.confidence_score for match in scored) / len(scored),
+    )
+
+
+def imputed_final_score(
+    normalized_semantic_score: float,
+    imputed_llm_match_score: float,
+    imputed_confidence_score: float,
+    weights: RankingWeights,
+) -> float:
+    """Score an unscored candidate on the same scale as scored candidates."""
+
+    return (
+        weights.semantic_weight * normalized_semantic_score
+        + weights.llm_match_weight * imputed_llm_match_score
+        + weights.confidence_weight * imputed_confidence_score
+    )
 
 
 def llm_selection_quotas(llm_candidate_k: int) -> tuple[int, int, int]:
@@ -366,8 +527,12 @@ def build_output_row(
     match: LLMMatchResult | None,
     risk_penalty: float,
     profile_text: str,
+    imputed_llm_match_score: float | None = None,
+    imputed_confidence_score: float | None = None,
 ) -> dict[str, Any]:
     return {
+        "imputed_llm_match_score": None if imputed_llm_match_score is None else round(imputed_llm_match_score, 6),
+        "imputed_confidence_score": None if imputed_confidence_score is None else round(imputed_confidence_score, 6),
         "final_rank": 0,
         "faiss_rank": int(candidate.get("rank", 0)),
         "best_faiss_rank": int(candidate.get("best_faiss_rank", candidate.get("rank", 0))),
@@ -411,8 +576,14 @@ def rerank_candidates_with_llm(
     llm_model: str = "",
     debug_target_title: str | None = None,
     progress_callback: ProgressCallback | None = None,
+    fallback_policy: FallbackPolicy = DEFAULT_FALLBACK_POLICY,
 ) -> tuple[list[dict[str, Any]], TimingSummary]:
-    """Rerank semantic candidates with budgeted local LLM analysis, cache, and timing."""
+    """Rerank semantic candidates with budgeted local LLM analysis, cache, and timing.
+
+    Pass ``llm_candidate_k=LLM_CANDIDATE_K_ALL`` to score every candidate.
+    ``fallback_policy`` controls how unscored candidates are placed on the score
+    scale; see the constant definitions for why the legacy policy is biased.
+    """
 
     started = time.perf_counter()
     weights = weights or RankingWeights()
@@ -427,30 +598,21 @@ def rerank_candidates_with_llm(
     cache_misses = 0
     llm_elapsed_total = 0.0
 
+    # Pass 1 scores the selected candidates. Imputing features for the rest needs the
+    # scored distribution, so no output row can be finalised until scoring completes.
+    scored: dict[str, tuple[LLMMatchResult, str, str]] = {}
+    pending: list[PendingScore] = []
+    selected_index = 0
+
     for idx, candidate in enumerate(candidates):
         novel_id = str(candidate.get("novel_id", idx))
         selection_key = candidate_key(candidate, fallback=idx)
-        candidate_for_output = selected_by_id.get(selection_key, candidate)
-        profile_text = profile_lookup.get(novel_id) or str(candidate.get("profile_text_preview", ""))
-        normalized_score = normalized.get(novel_id, 0.0)
-
         if selection_key not in selected_by_id:
-            rows.append(
-                build_output_row(
-                    candidate=candidate_for_output,
-                    normalized_semantic_score=normalized_score,
-                    selected_for_llm=False,
-                    analysis_provider="semantic_fallback",
-                    cache_hit=False,
-                    final_score=semantic_fallback_score(normalized_score, int(candidate.get("matched_query_count", 1))),
-                    match=None,
-                    risk_penalty=0.0,
-                    profile_text=profile_text,
-                )
-            )
             continue
 
-        selected_index = len([row for row in rows if row["selected_for_llm"]]) + 1
+        candidate_for_output = selected_by_id[selection_key]
+        profile_text = profile_lookup.get(novel_id) or str(candidate.get("profile_text_preview", ""))
+        selected_index += 1
         truncated_profile = truncate_profile(profile_text, llm_profile_max_chars)
         cache_key = make_cache_key(
             query=query,
@@ -494,54 +656,111 @@ def rerank_candidates_with_llm(
                         phase="start",
                     )
                 )
-            item_started = time.perf_counter()
-            try:
-                match = matcher.score(query=query, candidate=candidate_for_output, profile_text=truncated_profile, max_profile_chars=llm_profile_max_chars)
-                provider = getattr(matcher, "provider", "transformers")
-            except Exception as exc:  # pragma: no cover - defensive runtime fallback
+            pending.append(
+                PendingScore(
+                    selection_key=selection_key,
+                    selected_index=selected_index,
+                    candidate=candidate_for_output,
+                    truncated_profile=truncated_profile,
+                    cache_key=cache_key,
+                    title=title,
+                    faiss_rank=int(candidate.get("rank", 0)),
+                )
+            )
+            continue
+
+        scored[selection_key] = (match, provider, truncated_profile)
+
+    if pending:
+        batch_started = time.perf_counter()
+        matches = score_pending(
+            query=query,
+            pending=pending,
+            matcher=matcher,
+            llm_profile_max_chars=llm_profile_max_chars,
+        )
+        llm_elapsed_total += time.perf_counter() - batch_started
+        average_elapsed = llm_elapsed_total / max(len(pending), 1)
+
+        for item, match in zip(pending, matches, strict=True):
+            provider = "rule_fallback" if match is None else getattr(matcher, "provider", "transformers")
+            if match is None:
                 match = LLMMatchResult(
                     llm_match_score=0.0,
                     confidence="low",
-                    risk_flags=["llm_exception"],
-                    reason=str(exc)[:180],
+                    risk_flags=["llm_request_failed"],
+                    reason="Scoring request failed; candidate kept with a neutral-low result.",
                 )
-                provider = "rule_fallback"
-            elapsed = time.perf_counter() - item_started
-            llm_elapsed_total += elapsed
-            if use_cache and provider != "rule_fallback":
-                append_llm_cache(cache_path, cache_key, match)
-            avg = llm_elapsed_total / max(cache_misses, 1)
-            remaining = max(selected_count - selected_index, 0) * avg
+            elif use_cache:
+                append_llm_cache(cache_path, item.cache_key, match)
+            scored[item.selection_key] = (match, provider, item.truncated_profile)
             if progress_callback:
                 progress_callback(
                     LLMProgressEvent(
-                        index=selected_index,
+                        index=item.selected_index,
                         total=selected_count,
-                        title=title,
-                        faiss_rank=int(candidate.get("rank", 0)),
+                        title=item.title,
+                        faiss_rank=item.faiss_rank,
                         cache_status="cache miss",
-                        elapsed_seconds=elapsed,
-                        average_seconds=avg,
-                        estimated_remaining_seconds=remaining,
+                        elapsed_seconds=average_elapsed,
+                        average_seconds=average_elapsed,
+                        estimated_remaining_seconds=0.0,
                         llm_match_score=match.llm_match_score,
                         confidence=match.confidence,
                         phase="done",
                     )
                 )
 
-        risk_penalty = compute_risk_penalty(match, truncated_profile)
-        final_score = llm_final_score(normalized_score, match, risk_penalty, weights)
+    imputed_llm_score, imputed_confidence = impute_unscored_features([item[0] for item in scored.values()])
+
+    # Pass 2 builds every row. Under the default "impute" policy both branches use the
+    # same formula and therefore the same 0..1 scale, so selection into the LLM pool
+    # carries no score advantage of its own.
+    for idx, candidate in enumerate(candidates):
+        novel_id = str(candidate.get("novel_id", idx))
+        selection_key = candidate_key(candidate, fallback=idx)
+        candidate_for_output = selected_by_id.get(selection_key, candidate)
+        profile_text = profile_lookup.get(novel_id) or str(candidate.get("profile_text_preview", ""))
+        normalized_score = normalized.get(novel_id, 0.0)
+
+        if selection_key in scored:
+            match, provider, truncated_profile = scored[selection_key]
+            risk_penalty = compute_risk_penalty(match, truncated_profile)
+            rows.append(
+                build_output_row(
+                    candidate=candidate_for_output,
+                    normalized_semantic_score=normalized_score,
+                    selected_for_llm=True,
+                    analysis_provider=provider,
+                    cache_hit=provider == "cache",
+                    final_score=llm_final_score(normalized_score, match, risk_penalty, weights),
+                    match=match,
+                    risk_penalty=risk_penalty,
+                    profile_text=profile_text,
+                )
+            )
+            continue
+
+        if fallback_policy == "legacy_semantic":
+            final_score = semantic_fallback_score(normalized_score, int(candidate.get("matched_query_count", 1)))
+            row_imputed: tuple[float | None, float | None] = (None, None)
+        else:
+            final_score = imputed_final_score(normalized_score, imputed_llm_score, imputed_confidence, weights)
+            row_imputed = (imputed_llm_score, imputed_confidence)
+
         rows.append(
             build_output_row(
                 candidate=candidate_for_output,
                 normalized_semantic_score=normalized_score,
-                selected_for_llm=True,
-                analysis_provider=provider,
-                cache_hit=provider == "cache",
+                selected_for_llm=False,
+                analysis_provider="semantic_fallback",
+                cache_hit=False,
                 final_score=final_score,
-                match=match,
-                risk_penalty=risk_penalty,
+                match=None,
+                risk_penalty=0.0,
                 profile_text=profile_text,
+                imputed_llm_match_score=row_imputed[0],
+                imputed_confidence_score=row_imputed[1],
             )
         )
 
@@ -562,5 +781,6 @@ def rerank_candidates_with_llm(
         provider=getattr(matcher, "provider", ""),
         llm_model=llm_model,
         llm_profile_max_chars=llm_profile_max_chars,
+        fallback_policy=fallback_policy,
     )
     return rows, timing

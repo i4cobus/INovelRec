@@ -21,13 +21,14 @@ def main(
     out: Path = typer.Option(DEFAULT_PROFILE_OUTPUT_PATH, help="Profile parquet output path."),
     limit: int | None = typer.Option(None, help="Maximum number of inventory rows to process."),
     overwrite: bool = typer.Option(False, help="Overwrite existing output parquet."),
+    max_workers: int | None = typer.Option(None, help="Process pool size. Defaults to a capped share of available cores."),
 ) -> None:
     """Build compact cleaned novel profiles for later embeddings."""
 
     if out.exists() and not overwrite:
         raise typer.BadParameter(f"Output already exists: {out}. Use --overwrite to replace it.")
 
-    result = build_profiles(inventory_path=inventory, limit=limit)
+    result = build_profiles(inventory_path=inventory, limit=limit, max_workers=max_workers)
     df = write_profiles(result, out)
 
     summary = Table(title="Profile Build Summary")
@@ -39,6 +40,7 @@ def main(
     summary.add_row("Skipped failed inventory rows", str(result.skipped_failed))
     summary.add_row("Skipped missing files", str(result.skipped_missing))
     summary.add_row("Skipped read errors", str(result.skipped_read_error))
+    summary.add_row("Skipped duplicates", str(result.skipped_duplicate))
     summary.add_row("ZXCS boilerplate detected", str(result.zxcs_boilerplate_detected))
     summary.add_row("ZXCS boilerplate lines removed", str(result.zxcs_boilerplate_lines_removed))
     summary.add_row("Profiles with remaining ZXCS markers", str(result.profiles_with_remaining_boilerplate))

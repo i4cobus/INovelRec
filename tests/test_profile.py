@@ -115,3 +115,35 @@ def test_profile_generation_removes_zxcs_boilerplate(tmp_path: Path) -> None:
     assert "\u77e5\u8f69\u85cf\u4e66" not in row["profile_text"]
     assert "zxcs" not in row["profile_text"].lower()
     assert "\u6838\u5fc3\u6b63\u6587\u5185\u5bb9" in row["profile_text"]
+
+
+def test_build_profiles_parallel_matches_sequential(tmp_path: Path) -> None:
+    """Worker count must not change profiles, counters, or row order."""
+
+    rows = []
+    for index in range(10):
+        novel_path = tmp_path / f"novel_{index}.txt"
+        novel_path.write_text(
+            f"第一章 开始\n内容{index}。\n第二章 发展\n更多内容{index}。\n第三章 结束\n结尾{index}。",
+            encoding="utf-8",
+        )
+        rows.append(
+            {
+                "novel_id": f"n{index}",
+                "absolute_path": str(novel_path),
+                "detected_encoding": "utf-8",
+                "read_status": "ok",
+                "title_guess": f"小说{index}",
+                "author_guess": None,
+            }
+        )
+    inventory_path = tmp_path / "inventory.parquet"
+    pd.DataFrame(rows).to_parquet(inventory_path, index=False)
+
+    sequential = build_profiles(inventory_path=inventory_path, max_workers=1)
+    parallel = build_profiles(inventory_path=inventory_path, max_workers=4)
+
+    assert sequential.processed == 10
+    assert parallel.processed == 10
+    assert sequential.dataframe["novel_id"].tolist() == parallel.dataframe["novel_id"].tolist()
+    pd.testing.assert_frame_equal(sequential.dataframe, parallel.dataframe)

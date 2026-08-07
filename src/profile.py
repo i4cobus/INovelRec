@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from functools import partial
+from multiprocessing import get_context
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import pandas as pd
 from tqdm import tqdm
 
 from src.clean import CleaningStats, clean_novel_text_with_stats, contains_zxcs_boilerplate
-from src.config import DEFAULT_OUTPUT_PATH, PROCESSED_DATA_DIR
+from src.config import DEFAULT_OUTPUT_PATH, PROCESSED_DATA_DIR, resolve_worker_count
 from src.split_chapters import split_chapters
 
 DEFAULT_PROFILE_OUTPUT_PATH = PROCESSED_DATA_DIR / "novel_profiles.parquet"
@@ -25,6 +28,7 @@ class ProfileBuildResult:
     skipped_failed: int
     skipped_missing: int
     skipped_read_error: int
+    skipped_duplicate: int = 0
     zxcs_boilerplate_detected: int = 0
     zxcs_boilerplate_lines_removed: int = 0
     profiles_with_remaining_boilerplate: int = 0
@@ -149,12 +153,53 @@ def build_profile_from_inventory_row_with_stats(
     }, cleaning_stats
 
 
+@dataclass(frozen=True)
+class ProfileWorkerResult:
+    """One worker outcome: an accepted profile or the reason it was skipped."""
+
+    status: str
+    profile: dict[str, Any] | None
+    stats: CleaningStats
+
+
+def build_profile_worker(row: dict[str, Any], max_profile_chars: int = 3000) -> ProfileWorkerResult:
+    """Build one profile, classifying failures instead of raising.
+
+    Module-level so it stays picklable for ``ProcessPoolExecutor``.
+    """
+
+    if row.get("read_status") != "ok":
+        return ProfileWorkerResult("failed", None, CleaningStats())
+
+    # Duplicate copies would inflate the corpus, surface twice in one result list,
+    # and — worst — let the same book land on both sides of a train/eval split.
+    if bool(row.get("is_duplicate", False)):
+        return ProfileWorkerResult("duplicate", None, CleaningStats())
+
+    path = Path(str(row.get("absolute_path", "")))
+    if not path.exists():
+        return ProfileWorkerResult("missing", None, CleaningStats())
+
+    try:
+        profile, cleaning_stats = build_profile_from_inventory_row_with_stats(row, max_profile_chars=max_profile_chars)
+    except (OSError, UnicodeError, LookupError, ValueError):
+        return ProfileWorkerResult("read_error", None, CleaningStats())
+
+    if profile is None:
+        return ProfileWorkerResult("read_error", None, cleaning_stats)
+    return ProfileWorkerResult("ok", profile, cleaning_stats)
+
+
 def build_profiles(
     inventory_path: Path = DEFAULT_OUTPUT_PATH,
     limit: int | None = None,
     max_profile_chars: int = 3000,
+    max_workers: int | None = None,
 ) -> ProfileBuildResult:
-    """Build profile records from a Stage 1 inventory parquet."""
+    """Build profile records from a Stage 1 inventory parquet.
+
+    Output keeps inventory row order regardless of worker count.
+    """
 
     inventory = pd.read_parquet(inventory_path)
     if limit is not None:
@@ -164,36 +209,48 @@ def build_profiles(
     skipped_failed = 0
     skipped_missing = 0
     skipped_read_error = 0
+    skipped_duplicate = 0
     zxcs_boilerplate_detected = 0
     zxcs_boilerplate_lines_removed = 0
     profiles_with_remaining_boilerplate = 0
 
-    for row in tqdm(inventory.to_dict(orient="records"), desc="Building profiles", unit="novel"):
-        if row.get("read_status") != "ok":
+    rows = inventory.to_dict(orient="records")
+    worker = partial(build_profile_worker, max_profile_chars=max_profile_chars)
+    workers = min(resolve_worker_count(max_workers), len(rows)) if rows else 1
+    progress = partial(tqdm, total=len(rows), desc="Building profiles", unit="novel")
+
+    if workers <= 1:
+        outcomes: Iterator[ProfileWorkerResult] = progress(worker(row) for row in rows)
+        results = list(outcomes)
+    else:
+        # spawn, not fork: see the matching note in src/ingest.py.
+        with ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn")) as executor:
+            results = list(progress(executor.map(worker, rows, chunksize=1)))
+
+    for result in results:
+        if result.status == "failed":
             skipped_failed += 1
             continue
-
-        path = Path(str(row.get("absolute_path", "")))
-        if not path.exists():
+        if result.status == "missing":
             skipped_missing += 1
             continue
-
-        try:
-            profile, cleaning_stats = build_profile_from_inventory_row_with_stats(row, max_profile_chars=max_profile_chars)
-        except (OSError, UnicodeError, LookupError, ValueError):
+        if result.status == "duplicate":
+            skipped_duplicate += 1
+            continue
+        if result.status == "read_error" or result.profile is None:
             skipped_read_error += 1
             continue
 
-        if profile is not None:
-            if cleaning_stats.zxcs_detected:
-                zxcs_boilerplate_detected += 1
-                zxcs_boilerplate_lines_removed += cleaning_stats.zxcs_lines_removed
-            if any(
-                contains_zxcs_boilerplate(str(profile.get(column, "")))
-                for column in ("profile_text", "opening_sample", "middle_sample", "ending_sample")
-            ):
-                profiles_with_remaining_boilerplate += 1
-            records.append(profile)
+        profile = result.profile
+        if result.stats.zxcs_detected:
+            zxcs_boilerplate_detected += 1
+            zxcs_boilerplate_lines_removed += result.stats.zxcs_lines_removed
+        if any(
+            contains_zxcs_boilerplate(str(profile.get(column, "")))
+            for column in ("profile_text", "opening_sample", "middle_sample", "ending_sample")
+        ):
+            profiles_with_remaining_boilerplate += 1
+        records.append(profile)
 
     return ProfileBuildResult(
         dataframe=pd.DataFrame(records),
@@ -201,6 +258,7 @@ def build_profiles(
         skipped_failed=skipped_failed,
         skipped_missing=skipped_missing,
         skipped_read_error=skipped_read_error,
+        skipped_duplicate=skipped_duplicate,
         zxcs_boilerplate_detected=zxcs_boilerplate_detected,
         zxcs_boilerplate_lines_removed=zxcs_boilerplate_lines_removed,
         profiles_with_remaining_boilerplate=profiles_with_remaining_boilerplate,

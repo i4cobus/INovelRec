@@ -22,9 +22,17 @@ class NovelInventoryRecord(BaseModel):
     title_guess: str
     author_guess: str | None
     char_count: int
-    line_count: int
     estimated_chapter_count: int
-    first_2000_chars: str
-    sample_text: str
+
+    # Whitespace-insensitive hash of the decoded text. The same book saved under two
+    # filenames yields two novel_ids (which hash the path), so path identity cannot
+    # detect duplicates — and undetected duplicates leak between train and eval splits.
+    content_sha256: str = ""
+    is_duplicate: bool = False
+    duplicate_of: str | None = None
+
+    # Only populated with --store-sample-text. Nothing downstream reads it; building it
+    # costs a full extra pass over every novel.
+    sample_text: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

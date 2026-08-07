@@ -2,13 +2,13 @@
 __pycache__/
 .pytest_cache/
 *.pyc
-data/raw/
-data/processed/
-data/index/
-data/cache/
+data/
 reports/
 eval/results/
 eval/manual_judgements.csv
 docs/prompt*.md
 docs/pre_interview.md
 streamlit.out.log
+
+CLAUDE.md
+docs/

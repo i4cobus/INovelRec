@@ -34,12 +34,17 @@ class ProfileBuildResult:
     profiles_with_remaining_boilerplate: int = 0
 
 
-def read_text_with_encoding(path: Path, encoding: str | None) -> str:
-    """Read a raw text file with the encoding detected during inventory."""
+def read_text_with_encoding(path: Path, encoding: str | None, allow_lossy: bool = False) -> str:
+    """Read a raw text file with the encoding detected during inventory.
+
+    ``allow_lossy`` must mirror what Stage 1 decided for this file. A handful of
+    novels only decode with ``errors="replace"`` (a single corrupt byte each);
+    re-reading them strictly here would silently drop books Stage 1 recovered.
+    """
 
     if not encoding:
         raise ValueError("Missing detected encoding")
-    return path.read_text(encoding=encoding)
+    return path.read_text(encoding=encoding, errors="replace" if allow_lossy else "strict")
 
 
 def compact_sample(text: str, start: int, length: int) -> str:
@@ -119,7 +124,11 @@ def build_profile_from_inventory_row_with_stats(
     if not path.exists():
         return None, CleaningStats()
 
-    raw_text = read_text_with_encoding(path, row.get("detected_encoding"))
+    raw_text = read_text_with_encoding(
+        path,
+        row.get("detected_encoding"),
+        allow_lossy=int(row.get("decode_replacement_chars", 0) or 0) > 0,
+    )
     cleaned_text, cleaning_stats = clean_novel_text_with_stats(raw_text)
     chapters = split_chapters(cleaned_text)
     chapter_count = len(chapters)

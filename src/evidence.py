@@ -94,7 +94,7 @@ def load_raw_text_lookup(inventory_path: Path, novel_ids: set[str]) -> dict[str,
 
     inventory = pd.read_parquet(
         inventory_path,
-        columns=["novel_id", "absolute_path", "detected_encoding", "read_status"],
+        columns=["novel_id", "absolute_path", "detected_encoding", "read_status", "decode_replacement_chars"],
     )
     inventory = inventory[inventory["novel_id"].astype(str).isin(novel_ids)]
     texts: dict[str, str] = {}
@@ -103,7 +103,9 @@ def load_raw_text_lookup(inventory_path: Path, novel_ids: set[str]) -> dict[str,
             continue
         try:
             texts[str(row["novel_id"])] = read_text_with_encoding(
-                Path(str(row["absolute_path"])), row.get("detected_encoding")
+                Path(str(row["absolute_path"])),
+                row.get("detected_encoding"),
+                allow_lossy=int(row.get("decode_replacement_chars", 0) or 0) > 0,
             )
         except (OSError, UnicodeError, LookupError, ValueError):
             continue

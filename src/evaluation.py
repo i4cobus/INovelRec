@@ -55,13 +55,23 @@ def normalize_title(title: str) -> str:
 
 
 def title_matches_anchor(title: str, anchor: str) -> bool:
-    """Return True when title and anchor match by substring after normalization."""
+    """Return True when a corpus title names the anchored work.
+
+    Matching is by *prefix*, not by substring anywhere in the title. Bidirectional
+    substring matching inflates the only automatic metric this project has: in
+    this corpus, anchor 凡人修仙传 also matched 《小小凡人修仙传》 and anchor 遮天
+    matched 《医手遮天》 — different books entirely. A system could then score an
+    anchor hit without retrieving the anchored work at all.
+
+    A prefix still tolerates the edition and volume suffixes the corpus is full
+    of (《盗墓笔记》（实体封面》, 《坏蛋是怎样炼成的Ⅰ》).
+    """
 
     normalized_title = normalize_title(title)
     normalized_anchor = normalize_title(anchor)
     if not normalized_title or not normalized_anchor:
         return False
-    return normalized_anchor in normalized_title or normalized_title in normalized_anchor
+    return normalized_title.startswith(normalized_anchor)
 
 
 def first_anchor_rank(results: list[dict[str, Any]], anchors: list[str], k: int) -> int | None:
@@ -99,16 +109,30 @@ def compute_anchor_metrics(rows: list[dict[str, Any]], queries: list[EvalQuery],
         anchor_queries = [query for query in queries if query.anchor_titles]
         variant_summary: dict[str, Any] = {"queries_with_anchors": len(anchor_queries)}
         ranks: list[int] = []
+        total_anchors = sum(len(query.anchor_titles) for query in anchor_queries)
         for k in ks:
             hits = 0
+            anchors_found = 0
             for query in anchor_queries:
-                rank = first_anchor_rank(by_query_variant.get((query.query_id, variant), []), query.anchor_titles, k)
+                results = by_query_variant.get((query.query_id, variant), [])
+                rank = first_anchor_rank(results, query.anchor_titles, k)
                 if rank is not None:
                     hits += 1
                     if k == max(ks):
                         ranks.append(rank)
+                anchors_found += sum(
+                    1
+                    for anchor in query.anchor_titles
+                    if any(title_matches_anchor(str(item.get("title_guess", "")), anchor) for item in results[:k])
+                )
+            # Hit@K: share of queries with at least one anchor in the top K.
+            # Recall@K: share of all anchors found. These coincide only when every
+            # query carries exactly one anchor, which is why they were previously
+            # reporting the same number twice.
             variant_summary[f"Anchor Hit@{k}"] = hits / len(anchor_queries) if anchor_queries else 0.0
-            variant_summary[f"Anchor Recall@{k}"] = hits / len(anchor_queries) if anchor_queries else 0.0
+            variant_summary[f"Anchor Recall@{k}"] = (
+                anchors_found / total_anchors if total_anchors else 0.0
+            )
         variant_summary["average_first_anchor_rank"] = sum(ranks) / len(ranks) if ranks else None
         summary["variants"][variant] = variant_summary
     return summary

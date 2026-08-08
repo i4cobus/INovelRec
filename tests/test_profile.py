@@ -147,3 +147,32 @@ def test_build_profiles_parallel_matches_sequential(tmp_path: Path) -> None:
     assert parallel.processed == 10
     assert sequential.dataframe["novel_id"].tolist() == parallel.dataframe["novel_id"].tolist()
     pd.testing.assert_frame_equal(sequential.dataframe, parallel.dataframe)
+
+
+def test_lossy_decoded_novels_survive_stage_2(tmp_path: Path) -> None:
+    """Stage 1 recovers books with one corrupt byte; Stage 2 must not drop them."""
+
+    novel = tmp_path / "damaged.txt"
+    body = ("第一章 开始\n" + "内容内容。" * 500).encode("gb18030")
+    novel.write_bytes(body[:400] + b"\xff" + body[400:])
+
+    inventory = pd.DataFrame(
+        [
+            {
+                "novel_id": "damaged",
+                "absolute_path": str(novel),
+                "detected_encoding": "gb18030",
+                "read_status": "ok",
+                "title_guess": "受损",
+                "author_guess": None,
+                "decode_replacement_chars": 1,
+            }
+        ]
+    )
+    inventory_path = tmp_path / "inventory.parquet"
+    inventory.to_parquet(inventory_path, index=False)
+
+    result = build_profiles(inventory_path=inventory_path, max_workers=1)
+
+    assert result.processed == 1
+    assert result.skipped_read_error == 0

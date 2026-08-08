@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from src.evaluation import (
+    EvalQuery,
     cohen_kappa,
     compute_anchor_metrics,
     compute_manual_metrics,
@@ -156,3 +157,31 @@ def test_judge_human_agreement_reports_both_scales() -> None:
 def test_judge_human_agreement_requires_both_sides() -> None:
     with pytest.raises(ValueError, match="Missing agreement columns"):
         judge_human_agreement(pd.DataFrame({"relevance_label": [1]}))
+
+
+def test_anchor_matching_rejects_titles_that_merely_contain_the_anchor() -> None:
+    """Real corpus cases that bidirectional substring matching got wrong."""
+
+    assert title_matches_anchor("《凡人修仙传》", "凡人修仙传")
+    assert not title_matches_anchor("《小小凡人修仙传》", "凡人修仙传")
+    assert not title_matches_anchor("《医手遮天》", "遮天")
+
+
+def test_anchor_matching_tolerates_edition_suffixes() -> None:
+    assert title_matches_anchor("《盗墓笔记》（实体封面）", "盗墓笔记")
+    assert title_matches_anchor("《坏蛋是怎样炼成的Ⅰ》", "坏蛋是怎样炼成的")
+    assert title_matches_anchor("《三体》（1-3）", "三体")
+
+
+def test_hit_and_recall_differ_when_a_query_has_several_anchors() -> None:
+    queries = [
+        EvalQuery(query_id="q1", query="q", anchor_titles=["甲书", "乙书", "丙书"]),
+    ]
+    rows = [
+        {"query_id": "q1", "system_variant": "v", "rank": 1, "title_guess": "《甲书》"},
+        {"query_id": "q1", "system_variant": "v", "rank": 2, "title_guess": "《无关》"},
+    ]
+    summary = compute_anchor_metrics(rows, queries, ks=(5,))["variants"]["v"]
+
+    assert summary["Anchor Hit@5"] == 1.0
+    assert abs(summary["Anchor Recall@5"] - 1 / 3) < 1e-9

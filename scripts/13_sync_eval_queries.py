@@ -87,6 +87,19 @@ def main(
     added = [row for row in candidates if row["query_id"] not in frozen_ids]
     skipped = [row for row in candidates if row["query_id"] in frozen_ids]
 
+    # `constraint_checkable` is derived from the current rule definition, not authored
+    # by the reviewer, so it is refreshed even on frozen rows. What is frozen is the
+    # experimental design — query text, constraints, anchors, all chosen before any
+    # result was known. A derived flag left stale would silently misreport which arm
+    # a query belongs to, which is the split the constraint hypothesis is measured on.
+    reclassified = 0
+    for row in frozen:
+        unwanted = row.get("unwanted") or []
+        current = bool(unwanted) and all(is_rule_checkable(term) for term in unwanted)
+        if current != bool(row.get("constraint_checkable")):
+            reclassified += 1
+        row["constraint_checkable"] = current
+
     merged = frozen + added
     merged.sort(key=lambda row: row["query_id"])
 
@@ -97,7 +110,8 @@ def main(
     summary = Table(title="Eval Query Set")
     summary.add_column("Metric")
     summary.add_column("Value", justify="right")
-    summary.add_row("Frozen (carried over untouched)", str(len(frozen)))
+    summary.add_row("Frozen (text/anchors untouched)", str(len(frozen)))
+    summary.add_row("  reclassified by current rule", str(reclassified))
     summary.add_row("Added from draft", str(len(added)))
     summary.add_row("Skipped (id already frozen)", str(len(skipped)))
     summary.add_row("Total queries", str(len(merged)))

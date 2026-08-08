@@ -28,6 +28,10 @@ class NovelInventoryRecord(BaseModel):
     # filenames yields two novel_ids (which hash the path), so path identity cannot
     # detect duplicates — and undetected duplicates leak between train and eval splits.
     content_sha256: str = ""
+
+    # >0 means the text was recovered with a lossy decode; the count is how many
+    # characters could not be decoded. Downstream can filter on it if needed.
+    decode_replacement_chars: int = 0
     is_duplicate: bool = False
     duplicate_of: str | None = None
 

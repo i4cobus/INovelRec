@@ -19,6 +19,16 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+# Reasoning models emit a <think> block before their answer. For a task whose
+# whole output is a short JSON object that is pure overhead, and worse: with a
+# small max_tokens the trace consumes the entire budget and the JSON never
+# arrives, so every verdict parses as a failure and scores 0. Measured here, 95%
+# of a full evaluation run came back as 0.00 for exactly that reason.
+#
+# Disabling it belongs to the backend, not to each call site — a script forgetting
+# the flag produces plausible-looking zeros rather than an error.
+DISABLE_THINKING = {"chat_template_kwargs": {"enable_thinking": False}}
+
 Backend = Literal["transformers", "http"]
 BACKENDS: tuple[Backend, ...] = ("transformers", "http")
 DEFAULT_BACKEND: Backend = "transformers"
@@ -43,6 +53,8 @@ def create_matcher(
     api_key: str | None = None,
     max_workers: int | None = None,
     timeout: float | None = None,
+    extra_body: dict[str, Any] | None = None,
+    enable_thinking: bool = False,
 ) -> Any:
     """Build the matcher for the requested backend.
 
@@ -72,8 +84,13 @@ def create_matcher(
         create_openai_compatible_matcher,
     )
 
+    body = dict(extra_body or {})
+    if not enable_thinking:
+        body = {**DISABLE_THINKING, **body}
+
     return create_openai_compatible_matcher(
         model=model_name,
+        extra_body=body,
         base_url=base_url or DEFAULT_BASE_URL,
         api_key=api_key,
         max_new_tokens=max_new_tokens,

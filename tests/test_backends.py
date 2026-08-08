@@ -68,3 +68,29 @@ def test_non_generating_matcher_gets_wrapped() -> None:
 
     generator = as_explanation_generator(Bare())
     assert generator.generate("hi", max_new_tokens=8) == "wrapped:hi"
+
+
+def test_thinking_is_disabled_by_default() -> None:
+    """A reasoning trace eats a small token budget and the JSON never arrives —
+    which surfaces as a plausible 0.0 score, not as an error."""
+
+    matcher = create_matcher(backend="http", model_name="Qwen/Qwen3-32B", base_url="http://x/v1")
+    assert matcher.transport.extra_body["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_thinking_can_be_re_enabled() -> None:
+    matcher = create_matcher(
+        backend="http", model_name="m", base_url="http://x/v1", enable_thinking=True
+    )
+    assert "chat_template_kwargs" not in matcher.transport.extra_body
+
+
+def test_explicit_extra_body_wins() -> None:
+    matcher = create_matcher(
+        backend="http",
+        model_name="m",
+        base_url="http://x/v1",
+        extra_body={"chat_template_kwargs": {"enable_thinking": True}, "top_p": 0.8},
+    )
+    assert matcher.transport.extra_body["chat_template_kwargs"] == {"enable_thinking": True}
+    assert matcher.transport.extra_body["top_p"] == 0.8

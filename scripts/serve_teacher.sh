@@ -44,5 +44,4 @@ exec "$VENV/bin/vllm" serve "$MODEL" \
   --dtype bfloat16 \
   --max-model-len 16384 \
   --gpu-memory-utilization 0.90 \
-  --served-model-name "$MODEL" \
-  --disable-log-requests
+  --served-model-name "$MODEL"

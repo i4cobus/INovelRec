@@ -103,12 +103,28 @@ def build_query_expansion_prompt(raw_query: str, max_queries: int = 4) -> str:
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
-    """Extract the first JSON object from generated text."""
+    """Extract the first balanced JSON object from generated text.
 
-    match = re.search(r"\{.*\}", text, flags=re.S)
-    if not match:
-        raise ValueError("No JSON object found in LLM output")
-    return json.loads(match.group(0))
+    A greedy ``\{.*\}`` spans from the first brace anywhere in the output to the
+    last one, so a single brace inside a reasoning model's ``<think>`` block
+    swallows the real answer. Reasoning traces are stripped first, then braces are
+    matched by depth so the first complete object wins.
+    """
+
+    body = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
+    body = re.sub(r"^.*?</think>", "", body, flags=re.S)  # truncated trace, no opener
+    depth = 0
+    start = -1
+    for index, char in enumerate(body):
+        if char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+            if depth == 0:
+                return json.loads(body[start : index + 1])
+    raise ValueError("No JSON object found in LLM output")
 
 
 def parse_llm_match_result(text: str) -> LLMMatchResult:

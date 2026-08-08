@@ -34,6 +34,7 @@ DEFAULT_BACKOFF_SECONDS = 1.0
 DEFAULT_MAX_WORKERS = 16
 DEFAULT_MAX_NEW_TOKENS = 256
 RETRY_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1", "0.0.0.0")
 
 
 @dataclass(frozen=True)
@@ -78,11 +79,16 @@ class HTTPChatTransport:
     max_retries: int = DEFAULT_MAX_RETRIES
     backoff_seconds: float = DEFAULT_BACKOFF_SECONDS
     temperature: float = 0.0
+    # None means "decide from the URL". A locally served model must not be routed
+    # through an outbound proxy, but a hosted gateway usually has to be.
+    bypass_proxy: bool | None = None
     extra_body: dict[str, Any] = field(default_factory=dict)
     _client: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
+        if self.bypass_proxy is None:
+            self.bypass_proxy = is_local_url(self.base_url)
         if self.api_key is None:
             self.api_key = os.environ.get(DEFAULT_API_KEY_ENV)
         if self.max_retries < 1:
@@ -100,7 +106,16 @@ class HTTPChatTransport:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             # Pool generously: score_many drives many concurrent requests.
             limits = httpx.Limits(max_connections=DEFAULT_MAX_WORKERS * 2, max_keepalive_connections=DEFAULT_MAX_WORKERS)
-            self._client = httpx.Client(timeout=self.timeout, headers=headers, limits=limits)
+            # trust_env=False also drops proxy settings, which is exactly what a
+            # local vLLM needs: this host exports http_proxy, and the proxy answers
+            # a request for 127.0.0.1 by closing the connection. A hosted gateway
+            # keeps trust_env so it still reaches the outside world.
+            self._client = httpx.Client(
+                timeout=self.timeout,
+                headers=headers,
+                limits=limits,
+                trust_env=not self.bypass_proxy,
+            )
         return self._client
 
     def close(self) -> None:
@@ -111,7 +126,12 @@ class HTTPChatTransport:
             self._client = None
 
     def build_payload(self, prompt: str, max_tokens: int) -> dict[str, Any]:
-        """Build the chat-completions request body."""
+        """Build the chat-completions request body.
+
+        ``extra_body`` is where a reasoning model gets switched off. Qwen3 thinks
+        by default and its ``<think>`` block consumed the whole token budget
+        before any JSON appeared, so every verdict parsed as a failure.
+        """
 
         return {
             "model": self.model,
@@ -150,6 +170,21 @@ class HTTPChatTransport:
                 time.sleep(self.backoff_seconds * (attempt + 1))
 
         raise RuntimeError(f"Chat completion failed after {self.max_retries} attempts: {last_error}")
+
+
+def is_local_url(url: str) -> bool:
+    """Whether a URL points at this machine.
+
+    Hosts commonly export http_proxy for outbound access, and the proxy has no
+    route to 127.0.0.1 — it accepts the connection and closes it, which surfaces
+    as "Server disconnected without sending a response" rather than anything
+    mentioning proxies.
+    """
+
+    from urllib.parse import urlparse
+
+    host = (urlparse(url).hostname or "").lower()
+    return host in LOCAL_HOSTS
 
 
 def extract_message_content(data: dict[str, Any]) -> str:
@@ -280,6 +315,7 @@ def create_openai_compatible_matcher(
     max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
     max_workers: int = DEFAULT_MAX_WORKERS,
     timeout: float = DEFAULT_TIMEOUT,
+    extra_body: dict[str, Any] | None = None,
 ) -> OpenAICompatibleMatcher:
     """Create a matcher backed by an OpenAI-compatible endpoint."""
 
@@ -288,5 +324,6 @@ def create_openai_compatible_matcher(
         base_url=base_url,
         api_key=api_key,
         timeout=timeout,
+        extra_body=extra_body or {},
     )
     return OpenAICompatibleMatcher(transport, max_new_tokens=max_new_tokens, max_workers=max_workers)

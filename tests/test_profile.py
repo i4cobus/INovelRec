@@ -3,7 +3,15 @@ from pathlib import Path
 import pandas as pd
 
 from src.clean import clean_novel_text
-from src.profile import build_profiles, make_profile_text
+from src.profile import (
+    build_profiles,
+    extract_blurb,
+    make_profile_text,
+    extract_chapter_excerpts,
+    profile_chapter_indices,
+    trim_to_sentence,
+    window_fractions,
+)
 from src.split_chapters import split_chapters
 
 
@@ -20,20 +28,62 @@ def test_chapter_splitting() -> None:
     assert chapters[1].text == "\u5185\u5bb92"
 
 
-def test_profile_length_control() -> None:
-    long_sample = "\u6545\u4e8b" * 1000
-    profile = make_profile_text(
-        title_guess="\u6d4b\u8bd5\u4e66",
-        author_guess="\u4f5c\u8005",
-        char_count=100000,
-        chapter_count=120,
-        opening_sample=long_sample,
-        middle_sample=long_sample,
-        ending_sample=long_sample,
-        max_chars=1200,
+def test_profile_respects_the_char_budget() -> None:
+    text = make_profile_text(
+        title_guess="《测试》",
+        author_guess="张三",
+        char_count=1_000_000,
+        chapter_count=500,
+        blurb="简介。" * 400,
+        chapter_excerpts=["第一章 起\n" + "内容。" * 400] * 10,
+        max_chars=8000,
     )
-    assert len(profile) <= 1200
-    assert "\u6807\u9898\uff1a\u6d4b\u8bd5\u4e66" in profile
+    assert len(text) <= 8000
+    assert "内容简介" in text
+    assert "正文节选" in text
+
+
+def test_blurb_survives_truncation_ahead_of_excerpts() -> None:
+    """Genre lives in the synopsis, so it must not be the part that gets cut."""
+
+    text = make_profile_text(
+        title_guess="《测试》",
+        author_guess=None,
+        char_count=100,
+        chapter_count=10,
+        blurb="这是一个关于修仙的慢热故事。",
+        chapter_excerpts=["正文。" * 500] * 10,
+        max_chars=900,
+    )
+    assert "这是一个关于修仙的慢热故事。" in text
+
+
+def test_excerpts_end_on_sentence_boundaries() -> None:
+    """94% of the old character-offset slices ended mid-sentence."""
+
+    assert trim_to_sentence("第一句。第二句！第三句没写完", 12) == "第一句。第二句！"
+    assert trim_to_sentence("短句。", 100) == "短句。"
+
+
+def test_sampling_skips_the_finale() -> None:
+    """The last chapters are epilogue and afterword for 69% of this corpus."""
+
+    indices = profile_chapter_indices(100, samples=10)
+    assert max(indices) < 95
+    assert len(indices) == 10
+    assert indices == sorted(indices)
+
+
+def test_sampling_degrades_gracefully_for_short_books() -> None:
+    assert profile_chapter_indices(0) == []
+    assert profile_chapter_indices(1) == [0]
+    assert len(profile_chapter_indices(3, samples=10)) <= 3
+
+
+def test_blurb_extraction_stops_at_the_first_chapter() -> None:
+    blurb = extract_blurb("书名\n作者：X\n内容简介：\n一个故事。\n第一章 开始\n正文不应进来。")
+    assert blurb == "一个故事。"
+    assert extract_blurb("没有简介标记的文本") == ""
 
 
 def test_missing_or_failed_novel_handling(tmp_path: Path) -> None:
@@ -176,3 +226,38 @@ def test_lossy_decoded_novels_survive_stage_2(tmp_path: Path) -> None:
 
     assert result.processed == 1
     assert result.skipped_read_error == 0
+
+
+class _Chapter:
+    def __init__(self, text: str, title: str = "") -> None:
+        self.text = text
+        self.title = title
+
+
+def test_contents_only_headings_do_not_produce_an_empty_profile() -> None:
+    """《醉神香》: 20 contents entries, the whole novel under one late heading."""
+
+    chapters = [_Chapter("", f"第{i}回 目录") for i in range(20)]
+    chapters += [_Chapter("正文。" * 400, "第20回"), _Chapter("", "第21回"), _Chapter("结尾。" * 400, "第22回")]
+
+    excerpts = extract_chapter_excerpts(chapters, cleaned_text="全文。" * 5000)
+
+    assert len(excerpts) >= 3
+    assert all(excerpt.strip() for excerpt in excerpts)
+
+
+def test_books_without_detectable_chapters_still_get_spread_samples() -> None:
+    """140 novels yield a single 'chapter' holding everything; the old path gave
+    them only the opening few hundred characters."""
+
+    text = "".join(f"这是第{i}段内容，足够长以便采样。" for i in range(4000))
+    excerpts = extract_chapter_excerpts([_Chapter(text, "全文")], cleaned_text=text)
+
+    assert len(excerpts) == 10
+    assert len(set(excerpts)) == 10, "samples must come from different positions"
+
+
+def test_sampling_stops_short_of_the_tail_in_both_modes() -> None:
+    assert max(window_fractions(10)) <= 0.95
+    assert window_fractions(1) == [0.0]
+    assert window_fractions(0) == []

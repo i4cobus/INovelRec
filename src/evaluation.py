@@ -22,6 +22,9 @@ class EvalQuery:
     unwanted: list[str] = field(default_factory=list)
     anchor_titles: list[str] = field(default_factory=list)
     notes: str = ""
+    genre: str = ""
+    shape: str = ""
+    constraint_checkable: bool = False
 
 
 def load_eval_queries(path: Path) -> list[EvalQuery]:
@@ -42,6 +45,9 @@ def load_eval_queries(path: Path) -> list[EvalQuery]:
                 unwanted=[str(item) for item in data.get("unwanted", [])],
                 anchor_titles=[str(item) for item in data.get("anchor_titles", [])],
                 notes=str(data.get("notes", "")),
+                genre=str(data.get("genre", "")),
+                shape=str(data.get("shape", "")),
+                constraint_checkable=bool(data.get("constraint_checkable", False)),
             )
         )
     return queries

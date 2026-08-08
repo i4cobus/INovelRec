@@ -20,6 +20,14 @@ from src.judge import (
 CHEAP = PricePerMillion(input_usd=1.0, output_usd=5.0)
 
 
+class _Chapter:
+    """Stands in for src.split_chapters.Chapter."""
+
+    def __init__(self, text: str, title: str = "") -> None:
+        self.text = text
+        self.title = title
+
+
 def task(novel_id: str = "n0", evidence: str = "正文摘录内容") -> JudgeTask:
     return JudgeTask(
         query_id="q001",
@@ -229,3 +237,85 @@ def test_empty_task_list_is_free() -> None:
     verdicts, summary = run_judgements([], FakeJudgeTransport(), "m", budget)
     assert verdicts == {}
     assert summary.requested == 0
+
+
+def test_judge_evidence_avoids_the_chapters_the_profile_used() -> None:
+    """Both sides read the same substantive-chapter view: one uses, one avoids."""
+
+    from src.evidence import judge_chapter_indices
+    from src.profile import profile_chapter_indices, substantive_chapter_indices
+
+    for count in (40, 120, 663):
+        chapters = [_Chapter("正文内容。" * 100, f"第{i}章") for i in range(count)]
+        usable = substantive_chapter_indices(chapters)
+        used = {usable[position] for position in profile_chapter_indices(len(usable))}
+        judged = judge_chapter_indices("n0", chapters)
+        assert judged, count
+        assert not used & set(judged), count
+
+
+def test_judge_chapters_are_stable_and_novel_specific() -> None:
+    from src.evidence import judge_chapter_indices
+
+    chapters = [_Chapter("正文内容。" * 100, f"第{i}章") for i in range(300)]
+    assert judge_chapter_indices("abc", chapters) == judge_chapter_indices("abc", chapters)
+    assert judge_chapter_indices("abc", chapters) != judge_chapter_indices("xyz", chapters)
+
+
+def test_table_of_contents_headings_never_become_evidence() -> None:
+    """章回体 novels open with a contents list whose entries have empty bodies."""
+
+    from src.evidence import judge_chapter_indices
+    from src.profile import extract_chapter_excerpts
+
+    chapters = [_Chapter("", f"第{i}回 目录项") for i in range(20)]
+    chapters += [_Chapter("真正的正文。" * 300, f"第{i}回") for i in range(20, 28)]
+
+    judged = judge_chapter_indices("n0", chapters)
+    assert judged
+    assert all(index >= 20 for index in judged)
+    assert len(extract_chapter_excerpts(chapters)) >= 3
+
+
+def test_profile_and_judge_windows_interleave_without_chapters() -> None:
+    """With no chapter structure both fall back to offsets; they must not collide."""
+
+    from src.evidence import judge_window_fractions
+    from src.profile import window_fractions
+
+    assert not set(window_fractions(10)) & set(judge_window_fractions(6))
+
+
+def test_judge_evidence_falls_back_when_there_is_no_chapter_structure() -> None:
+    from src.evidence import sample_judge_evidence
+
+    text = "没有章节标题的一整段文本。" * 500
+    assert sample_judge_evidence(text, "n0", windows=3, window_chars=100)
+
+
+def test_evidence_includes_the_synopsis_and_named_chapters() -> None:
+    """Chapter-fragment-only evidence left annotators unable to judge genre."""
+
+    from src.evidence import sample_judge_evidence
+
+    text = (
+        "书名\n作者：某人\n内容简介：\n一个厨子在小店做菜的治愈日常故事。\n"
+        + "".join(f"第{i:04d}章 标题{i}\n" + "正文内容。" * 200 + "\n" for i in range(1, 60))
+    )
+    evidence = sample_judge_evidence(text, "n0", windows=4, window_chars=200)
+
+    assert "【作品简介】" in evidence
+    assert "治愈日常" in evidence
+    assert "第" in evidence and "章" in evidence
+
+
+def test_evidence_excerpts_end_on_sentence_boundaries() -> None:
+    from src.evidence import sample_judge_evidence
+
+    text = "".join(f"第{i:04d}章 标题\n" + "这是一句完整的话。" * 60 + "\n" for i in range(1, 40))
+    evidence = sample_judge_evidence(text, "n0", windows=3, window_chars=150)
+
+    for block in evidence.split("[……]"):
+        body = block.strip().splitlines()[-1].strip()
+        if body:
+            assert body.endswith(("。", "！", "？", "…", "”", "』", "」")), body[-30:]

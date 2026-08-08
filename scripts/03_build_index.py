@@ -12,10 +12,9 @@ from rich.table import Table
 from src.embed import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_EMBEDDING_MODEL,
-    close_encode_pool,
     encode_documents,
+    encode_documents_multi_gpu,
     load_embedding_model,
-    open_encode_pool,
 )
 from src.vector_index import (
     DEFAULT_ID_MAP_PATH,
@@ -63,20 +62,18 @@ def main(
     console.print(f"Loaded profiles: {len(loaded.dataframe)}")
     console.print(f"Skipped profiles: {loaded.skipped_rows}")
 
-    embedding_model = load_embedding_model(model, device=device)
-    pool = open_encode_pool(embedding_model) if multi_gpu else None
-    try:
-        embeddings = encode_documents(
-            embedding_model,
+    if multi_gpu:
+        console.print("Sharding across all visible GPUs (one worker process per device).")
+        embeddings = encode_documents_multi_gpu(
+            model,
             texts,
             batch_size=batch_size,
             normalize_embeddings=True,
-            pool=pool,
-            chunk_size=chunk_size,
+            progress=lambda device: console.print(f"  shard done: {device}"),
         )
-    finally:
-        if pool is not None:
-            close_encode_pool(embedding_model, pool)
+    else:
+        embedding_model = load_embedding_model(model, device=device)
+        embeddings = encode_documents(embedding_model, texts, batch_size=batch_size, normalize_embeddings=True)
     index = build_faiss_index(embeddings)
     id_map = make_id_map(loaded.dataframe)
     metadata = make_index_metadata(

@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+import math
+import tempfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import get_context
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
 
 import numpy as np
 
@@ -162,3 +167,80 @@ def encode_documents(
         chunk_size=chunk_size,
         show_progress_bar=show_progress_bar,
     )
+
+
+def encode_shard(
+    model_name: str,
+    device: str,
+    texts: list[str],
+    batch_size: int,
+    normalize_embeddings: bool,
+    out_path: str,
+) -> str:
+    """Encode one shard on one GPU and persist it. Module-level so spawn can pickle it."""
+
+    model = load_embedding_model(model_name, device=device)
+    vectors = encode_documents(
+        model,
+        texts,
+        batch_size=batch_size,
+        normalize_embeddings=normalize_embeddings,
+        show_progress_bar=False,
+    )
+    np.save(out_path, vectors)
+    return out_path
+
+
+def encode_documents_multi_gpu(
+    model_name: str,
+    texts: list[str],
+    devices: list[str] | None = None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    normalize_embeddings: bool = True,
+    work_dir: Path | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> np.ndarray:
+    """Shard documents across GPUs, one independent worker process per device.
+
+    Replaces ``sentence_transformers.start_multi_process_pool``, which hung here:
+    it created its semaphores but never started a worker, leaving the parent
+    blocked on an empty queue for an hour with seven idle GPUs. Owning the
+    sharding makes failures visible per shard and keeps this step — rerun on every
+    profile change — debuggable.
+
+    Row order is preserved: shard *i* covers a contiguous slice and results are
+    concatenated in device order.
+    """
+
+    if not texts:
+        return np.empty((0, 0), dtype=np.float32)
+
+    if devices is None:
+        import torch
+
+        count = torch.cuda.device_count()
+        devices = [f"cuda:{index}" for index in range(count)] or ["cpu"]
+    devices = devices[: max(1, min(len(devices), len(texts)))]
+
+    if len(devices) == 1:
+        model = load_embedding_model(model_name, device=devices[0])
+        return encode_documents(model, texts, batch_size=batch_size, normalize_embeddings=normalize_embeddings)
+
+    with tempfile.TemporaryDirectory(dir=work_dir) as scratch:
+        size = math.ceil(len(texts) / len(devices))
+        jobs = []
+        for index, device in enumerate(devices):
+            shard = texts[index * size : (index + 1) * size]
+            if not shard:
+                continue
+            jobs.append((model_name, device, shard, batch_size, normalize_embeddings, str(Path(scratch) / f"shard{index}.npy")))
+
+        with ProcessPoolExecutor(max_workers=len(jobs), mp_context=get_context("spawn")) as executor:
+            futures = {executor.submit(encode_shard, *job): job[1] for job in jobs}
+            for future in as_completed(futures):
+                device = futures[future]
+                future.result()  # surface worker exceptions instead of hanging
+                if progress:
+                    progress(device)
+
+        return ensure_float32_2d(np.concatenate([np.load(job[5]) for job in jobs], axis=0))

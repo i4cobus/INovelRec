@@ -87,8 +87,43 @@ def first_anchor_rank(results: list[dict[str, Any]], anchors: list[str], k: int)
     return None
 
 
-def compute_anchor_metrics(rows: list[dict[str, Any]], queries: list[EvalQuery], ks: tuple[int, ...] = (1, 5, 10)) -> dict[str, Any]:
-    """Compute anchor Hit@K and average first-anchor rank by system variant."""
+def resolve_anchor_folds(
+    queries: list[EvalQuery],
+    titles_by_novel: dict[str, str],
+    fold_lookup: dict[str, str],
+) -> dict[str, str]:
+    """Map each anchor title to the fold its book belongs to.
+
+    Anchors are drawn from the whole corpus, so most land in the train fold by
+    construction. Once the profiler and reranker are trained on train-fold
+    teacher labels, recall on those anchors is partly memorisation. Reporting
+    the two folds separately turns that confound into a measurement: the gap
+    between train-fold and eval-fold anchor recall *is* the memorisation effect.
+    """
+
+    folds: dict[str, str] = {}
+    for query in queries:
+        for anchor in query.anchor_titles:
+            for novel_id, title in titles_by_novel.items():
+                if title_matches_anchor(str(title), anchor):
+                    fold = fold_lookup.get(str(novel_id))
+                    if fold:
+                        folds[anchor] = fold
+                    break
+    return folds
+
+
+def compute_anchor_metrics(
+    rows: list[dict[str, Any]],
+    queries: list[EvalQuery],
+    ks: tuple[int, ...] = (1, 5, 10),
+    anchor_folds: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Compute anchor Hit@K and average first-anchor rank by system variant.
+
+    Pass ``anchor_folds`` to additionally break Recall@K down by fold; see
+    ``resolve_anchor_folds`` for why that breakdown matters after training.
+    """
 
     by_query_variant: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
@@ -110,9 +145,16 @@ def compute_anchor_metrics(rows: list[dict[str, Any]], queries: list[EvalQuery],
         variant_summary: dict[str, Any] = {"queries_with_anchors": len(anchor_queries)}
         ranks: list[int] = []
         total_anchors = sum(len(query.anchor_titles) for query in anchor_queries)
+        fold_totals: dict[str, int] = {}
+        if anchor_folds:
+            for query in anchor_queries:
+                for anchor in query.anchor_titles:
+                    fold = anchor_folds.get(anchor, "unknown")
+                    fold_totals[fold] = fold_totals.get(fold, 0) + 1
         for k in ks:
             hits = 0
             anchors_found = 0
+            found_by_fold: dict[str, int] = {}
             for query in anchor_queries:
                 results = by_query_variant.get((query.query_id, variant), [])
                 rank = first_anchor_rank(results, query.anchor_titles, k)
@@ -120,11 +162,12 @@ def compute_anchor_metrics(rows: list[dict[str, Any]], queries: list[EvalQuery],
                     hits += 1
                     if k == max(ks):
                         ranks.append(rank)
-                anchors_found += sum(
-                    1
-                    for anchor in query.anchor_titles
-                    if any(title_matches_anchor(str(item.get("title_guess", "")), anchor) for item in results[:k])
-                )
+                for anchor in query.anchor_titles:
+                    if any(title_matches_anchor(str(item.get("title_guess", "")), anchor) for item in results[:k]):
+                        anchors_found += 1
+                        if anchor_folds:
+                            fold = anchor_folds.get(anchor, "unknown")
+                            found_by_fold[fold] = found_by_fold.get(fold, 0) + 1
             # Hit@K: share of queries with at least one anchor in the top K.
             # Recall@K: share of all anchors found. These coincide only when every
             # query carries exactly one anchor, which is why they were previously
@@ -133,6 +176,15 @@ def compute_anchor_metrics(rows: list[dict[str, Any]], queries: list[EvalQuery],
             variant_summary[f"Anchor Recall@{k}"] = (
                 anchors_found / total_anchors if total_anchors else 0.0
             )
+            if anchor_folds:
+                variant_summary[f"Anchor Recall@{k} by fold"] = {
+                    fold: {
+                        "found": found_by_fold.get(fold, 0),
+                        "total": total,
+                        "recall": found_by_fold.get(fold, 0) / total if total else 0.0,
+                    }
+                    for fold, total in sorted(fold_totals.items())
+                }
         variant_summary["average_first_anchor_rank"] = sum(ranks) / len(ranks) if ranks else None
         summary["variants"][variant] = variant_summary
     return summary

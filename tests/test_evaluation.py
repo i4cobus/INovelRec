@@ -12,6 +12,7 @@ from src.evaluation import (
     load_eval_queries,
     judge_human_agreement,
     load_manual_judgements,
+    resolve_anchor_folds,
     title_matches_anchor,
     write_eval_outputs,
 )
@@ -185,3 +186,37 @@ def test_hit_and_recall_differ_when_a_query_has_several_anchors() -> None:
 
     assert summary["Anchor Hit@5"] == 1.0
     assert abs(summary["Anchor Recall@5"] - 1 / 3) < 1e-9
+
+
+def test_recall_is_broken_down_by_fold() -> None:
+    """The train/eval gap after training is the memorisation signal."""
+
+    queries = [EvalQuery(query_id="q1", query="q", anchor_titles=["甲书", "乙书"])]
+    rows = [
+        {"query_id": "q1", "system_variant": "v", "rank": 1, "title_guess": "《甲书》"},
+        {"query_id": "q1", "system_variant": "v", "rank": 2, "title_guess": "《无关》"},
+    ]
+    summary = compute_anchor_metrics(
+        rows, queries, ks=(5,), anchor_folds={"甲书": "train", "乙书": "eval"}
+    )["variants"]["v"]
+
+    by_fold = summary["Anchor Recall@5 by fold"]
+    assert by_fold["train"] == {"found": 1, "total": 1, "recall": 1.0}
+    assert by_fold["eval"] == {"found": 0, "total": 1, "recall": 0.0}
+
+
+def test_fold_breakdown_is_absent_without_a_lookup() -> None:
+    queries = [EvalQuery(query_id="q1", query="q", anchor_titles=["甲书"])]
+    rows = [{"query_id": "q1", "system_variant": "v", "rank": 1, "title_guess": "《甲书》"}]
+    summary = compute_anchor_metrics(rows, queries, ks=(5,))["variants"]["v"]
+    assert not any("by fold" in key for key in summary)
+
+
+def test_resolve_anchor_folds_maps_titles_through_the_corpus() -> None:
+    queries = [EvalQuery(query_id="q1", query="q", anchor_titles=["紫川", "缺失的书"])]
+    folds = resolve_anchor_folds(
+        queries,
+        titles_by_novel={"n1": "《紫川》", "n2": "《别的》"},
+        fold_lookup={"n1": "eval", "n2": "train"},
+    )
+    assert folds == {"紫川": "eval"}

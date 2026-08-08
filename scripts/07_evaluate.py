@@ -10,10 +10,19 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+import pandas as pd
+
 from src.app_pipeline import resolve_device
 from src.embed import DEFAULT_EMBEDDING_MODEL, load_embedding_model
-from src.evaluation import EvalQuery, compute_anchor_metrics, load_eval_queries, write_eval_outputs
+from src.evaluation import (
+    EvalQuery,
+    compute_anchor_metrics,
+    load_eval_queries,
+    resolve_anchor_folds,
+    write_eval_outputs,
+)
 from src.backends import create_matcher
+from src.config import DEFAULT_OUTPUT_PATH
 from src.llm_matcher import DEFAULT_LLM_MODEL
 from src.preferences import parse_preference_query
 from src.query_expansion import ExpandedQuery, build_expanded_queries
@@ -102,6 +111,18 @@ def run_full(
     return ranked
 
 
+def load_anchor_folds(queries: list[EvalQuery], inventory: Path, splits: Path) -> dict[str, str]:
+    """Resolve anchor -> fold, returning empty when the artifacts are missing."""
+
+    if not inventory.exists() or not splits.exists():
+        return {}
+    novels = pd.read_parquet(inventory, columns=["novel_id", "title_guess"])
+    titles = dict(zip(novels["novel_id"].astype(str), novels["title_guess"].astype(str), strict=False))
+    folds = pd.read_parquet(splits, columns=["novel_id", "fold"])
+    fold_lookup = dict(zip(folds["novel_id"].astype(str), folds["fold"].astype(str), strict=False))
+    return resolve_anchor_folds(queries, titles, fold_lookup)
+
+
 def print_anchor_summary(summary: dict[str, Any]) -> None:
     """Print automatic anchor metrics."""
 
@@ -123,6 +144,21 @@ def print_anchor_summary(summary: dict[str, Any]) -> None:
         )
     console.print(table)
 
+    for variant, values in summary["variants"].items():
+        breakdown = values.get("Anchor Recall@10 by fold")
+        if not breakdown:
+            continue
+        parts = ", ".join(
+            f"{fold} {stats['found']}/{stats['total']} ({stats['recall']:.3f})"
+            for fold, stats in breakdown.items()
+        )
+        console.print(f"{variant} Recall@10 by fold: {parts}")
+    if any("Anchor Recall@10 by fold" in values for values in summary["variants"].values()):
+        console.print(
+            "[dim]Anchors in the train fold will be seen during teacher labelling; a train/eval "
+            "gap after training measures memorisation, not retrieval quality.[/dim]"
+        )
+
 
 @app.command()
 def main(
@@ -138,6 +174,7 @@ def main(
     index: Path = typer.Option(DEFAULT_INDEX_PATH, help="FAISS index path."),
     id_map: Path = typer.Option(DEFAULT_ID_MAP_PATH, help="Novel id map path."),
     profiles: Path = typer.Option(DEFAULT_PROFILES_PATH, help="Novel profiles parquet path."),
+    splits: Path = typer.Option(Path("data/processed/book_splits.parquet"), help="Book fold assignment, for the train/eval anchor breakdown."),
     device: str = typer.Option("auto", help="Torch device: auto, cuda, or cpu."),
     backend: str = typer.Option("transformers", help="LLM backend: transformers (in-process) or http (OpenAI-compatible endpoint)."),
     llm_base_url: str | None = typer.Option(None, help="Base URL for the http backend, e.g. http://127.0.0.1:8000/v1. Env: INOVELREC_LLM_BASE_URL."),
@@ -195,7 +232,8 @@ def main(
     csv_path, jsonl_path = write_eval_outputs(rows, out_dir)
     console.print(f"Wrote CSV: {csv_path}")
     console.print(f"Wrote JSONL: {jsonl_path}")
-    print_anchor_summary(compute_anchor_metrics(rows, queries, ks=(1, 5, 10)))
+    anchor_folds = load_anchor_folds(queries, DEFAULT_OUTPUT_PATH, splits)
+    print_anchor_summary(compute_anchor_metrics(rows, queries, ks=(1, 5, 10), anchor_folds=anchor_folds))
     console.print(f"Runtime: {time.perf_counter() - started:.2f}s")
 
 

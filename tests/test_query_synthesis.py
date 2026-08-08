@@ -17,6 +17,7 @@ from src.query_synthesis import (
     deduplicate,
     is_duplicate,
     label_constraint_by_rule,
+    looks_truncated,
     parse_synthesis_response,
     token_overlap,
     verify_constraint_claim,
@@ -202,13 +203,56 @@ def test_deduplicate_protects_the_evaluation_set() -> None:
         SynthesizedQuery(query="凡人流 仙侠 慢热 理性主角 不系统", shape="kw"),
         SynthesizedQuery(query="宅斗 宫斗 权谋 女主聪慧", shape="kw"),
     ]
-    kept, dropped = deduplicate(generated, reserved=["凡人流 仙侠 慢热 理性主角 不系统"])
+    kept, dropped, leaked = deduplicate(generated, reserved=["凡人流 仙侠 慢热 理性主角 不系统"])
 
-    assert dropped == 1
+    assert (dropped, leaked) == (1, 0)
     assert [item.query for item in kept] == ["宅斗 宫斗 权谋 女主聪慧"]
 
 
 def test_deduplicate_also_removes_self_repeats() -> None:
     generated = [SynthesizedQuery(query="玄幻 升级流 热血", shape="kw")] * 3
-    kept, dropped = deduplicate(generated, reserved=[])
+    kept, dropped, _ = deduplicate(generated, reserved=[])
     assert len(kept) == 1 and dropped == 2
+
+
+def test_reusing_an_eval_query_positive_half_is_leakage() -> None:
+    """Swapping only the exclusion slips under the whole-query overlap threshold.
+
+    「美食 日常 温情 不重生」 vs evaluation's 「美食 日常 温情 不系统」 overlaps 0.75 as
+    whole strings, but the positive half is identical, so training on it still
+    reveals which books match that phrasing.
+    """
+
+    evaluation = [SynthesizedQuery(query="美食 日常 温情 不系统", shape="kw", unwanted=["系统"])]
+    generated = [
+        SynthesizedQuery(query="美食 日常 温情 不重生", shape="kw", unwanted=["重生"]),
+        SynthesizedQuery(query="宅斗 权谋 女主聪慧 不重生", shape="kw", unwanted=["重生"]),
+    ]
+    kept, _, leaked = deduplicate(generated, reserved=[], reserved_queries=evaluation)
+
+    assert leaked == 1
+    assert [item.query for item in kept] == ["宅斗 权谋 女主聪慧 不重生"]
+
+
+def test_sentence_shaped_queries_are_not_flagged_as_leakage() -> None:
+    """A one-phrase positive side would collide with everything under this check.
+
+    Splitting 「类似某类历史战争题材小说，但不要恋爱元素」 on whitespace yields a single
+    token, so any overlap ratio is 1.0 by construction. That is tokenisation, not
+    leakage, and filtering on it would delete every sentence- and comparison-shaped
+    query — half the generated set.
+    """
+
+    evaluation = [SynthesizedQuery(query="历史 权谋 朝堂 不玄幻", shape="kw", unwanted=["玄幻"])]
+    generated = [SynthesizedQuery(query="类似某类历史战争题材小说，但不要恋爱元素", shape="cmp", unwanted=["恋爱"])]
+    kept, _, leaked = deduplicate(generated, reserved=[], reserved_queries=evaluation)
+
+    assert leaked == 0 and len(kept) == 1
+
+
+def test_a_truncated_response_is_distinguishable_from_an_empty_one() -> None:
+    """Both parse to nothing; only one is fixed by a larger token budget."""
+
+    assert looks_truncated('{"queries":[{"query":"玄幻 热血 不系统","shape":"kw"')
+    assert not looks_truncated('{"queries":[]}')
+    assert not looks_truncated("<think>想想 {要点}</think>" + '{"queries":[]}')

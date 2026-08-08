@@ -51,6 +51,9 @@ MIN_QUERY_CHARS = 6
 MAX_QUERY_CHARS = 60
 # Two queries overlapping this much in tokens are the same need twice.
 DUPLICATE_TOKEN_OVERLAP = 0.8
+# Below this, a "positive side" is one long phrase rather than a keyword list, and
+# comparing it to an evaluation query measures tokenisation rather than leakage.
+MIN_POSITIVE_TOKENS_FOR_LEAK_CHECK = 2
 
 TOKEN_SPLIT = re.compile(r"[\s,，、;；/|]+")
 
@@ -238,16 +241,74 @@ def label_constraint_by_rule(query: SynthesizedQuery, novel_text: str) -> Synthe
     return replace(query, seed_satisfies_constraint=not violates)
 
 
-def deduplicate(queries: list[SynthesizedQuery], reserved: list[str]) -> tuple[list[SynthesizedQuery], int]:
-    """Drop queries repeating each other or any reserved (evaluation) query."""
+def looks_truncated(text: str) -> bool:
+    """Whether generation stopped mid-JSON.
+
+    A truncated response parses to zero queries, which is indistinguishable from
+    "this book yielded nothing" unless it is counted separately. At 600 output
+    tokens a third of responses were cut off mid-object and the loss was invisible
+    in the summary; the run reported `Failed requests 0` while silently discarding
+    half its seeds.
+    """
+
+    body = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
+    return body.count("{") != body.count("}")
+
+
+def positive_tokens(query: str, unwanted: list[str]) -> set[str]:
+    """Query tokens with the exclusion clause removed.
+
+    Only meaningful for space-separated keyword queries; a sentence-shaped query
+    yields one or two long tokens, which is why callers require a minimum size
+    before comparing.
+    """
+
+    return {token for token in normalize_tokens(query) if not any(term in token for term in unwanted)}
+
+
+def leaks_positive_side(query: SynthesizedQuery, reserved: list[SynthesizedQuery | str], threshold: float = DUPLICATE_TOKEN_OVERLAP) -> bool:
+    """Whether a query reuses an evaluation query's positive half verbatim.
+
+    「美食 日常 温情 不重生」 against evaluation's 「美食 日常 温情 不系统」 falls under the
+    whole-query overlap threshold because the exclusion differs, yet training on it
+    still shows the model exactly which books satisfy that positive phrasing. Rare
+    (5 in 9,415) but free to remove, and evaluation validity is not worth 0.1%.
+    """
+
+    mine = positive_tokens(query.query, query.unwanted)
+    if len(mine) < MIN_POSITIVE_TOKENS_FOR_LEAK_CHECK:
+        return False
+    for other in reserved:
+        text, unwanted = (other, []) if isinstance(other, str) else (other.query, other.unwanted)
+        theirs = positive_tokens(text, unwanted)
+        if len(theirs) < MIN_POSITIVE_TOKENS_FOR_LEAK_CHECK:
+            continue
+        if len(mine & theirs) / min(len(mine), len(theirs)) >= threshold:
+            return True
+    return False
+
+
+def deduplicate(
+    queries: list[SynthesizedQuery],
+    reserved: list[str],
+    reserved_queries: list[SynthesizedQuery] | None = None,
+) -> tuple[list[SynthesizedQuery], int, int]:
+    """Drop queries repeating each other, or leaking an evaluation query.
+
+    Returns the kept queries, the duplicate count, and the positive-side leak count.
+    """
 
     kept: list[SynthesizedQuery] = []
     seen = list(reserved)
-    dropped = 0
+    dropped = leaked = 0
+    guard = reserved_queries if reserved_queries is not None else list(reserved)
     for item in queries:
         if is_duplicate(item.query, seen):
             dropped += 1
             continue
+        if leaks_positive_side(item, guard):
+            leaked += 1
+            continue
         seen.append(item.query)
         kept.append(item)
-    return kept, dropped
+    return kept, dropped, leaked

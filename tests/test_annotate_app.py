@@ -104,3 +104,20 @@ def test_filled_sheet_is_readable_by_the_agreement_script(tmp_path: Path) -> Non
     filled = reloaded[reloaded["relevance_label"].notna()]
     assert len(filled) == 2
     assert bool(filled.iloc[0]["constraint_violation"]) is True
+
+
+def test_next_unlabeled_stays_in_range_when_everything_is_labelled(tmp_path: Path) -> None:
+    """The caller seeds this with -1 on first load; a finished sheet must not
+    hand back -1 as a row number."""
+
+    sheet = load_sheet(write_sheet(tmp_path, count=3))
+    everything = {("q001", f"n{index}"): {} for index in range(3)}
+
+    for start in (-1, 0, 2):
+        assert 0 <= next_unlabeled(sheet, everything, start) < 3
+
+
+def test_next_unlabeled_handles_an_empty_sheet(tmp_path: Path) -> None:
+    path = tmp_path / "empty.csv"
+    sheet_frame(1).iloc[0:0].to_csv(path, index=False)  # 保留表头，只是没有行
+    assert next_unlabeled(load_sheet(path), {}, -1) == 0

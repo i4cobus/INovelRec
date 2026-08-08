@@ -31,6 +31,10 @@ FINALE_SKIP_FRACTION = 0.05
 MIN_CHAPTER_CHARS = 200
 # Below this many real chapters, chapter structure is not worth trusting.
 MIN_CHAPTERS_FOR_SAMPLING = 3
+# 黄金三章: Chinese web novels front-load premise, protagonist and 金手指 into the
+# opening chapters because readers abandon a book there. Spreading samples evenly
+# spends nine of ten slots on the thinnest part of the book and one on the richest.
+OPENING_CHAPTERS = 4
 
 SENTENCE_ENDINGS = "。！？…”』」)）"
 # Anchored to line start: a bare 简介 appearing mid-sentence in the prose would
@@ -117,13 +121,18 @@ def profile_chapter_indices(
     chapter_count: int,
     samples: int = DEFAULT_CHAPTER_SAMPLES,
     finale_skip: float = FINALE_SKIP_FRACTION,
+    opening: int = OPENING_CHAPTERS,
 ) -> list[int]:
-    """Choose evenly spread chapter indices, deliberately skipping the finale.
+    """Take the opening chapters, then spread the rest, skipping the finale.
 
-    The old profile's third window was literally the last 650 characters of the
-    file. For 69% of this corpus that is 全书完 / 番外 / 作者感言 rather than
-    narrative — a slice-of-life cooking novel ended up profiled on its epilogue's
-    talk of NPUs. Sampling stops short of the tail.
+    The opening block exists because of 黄金三章: a Chinese web novel states its
+    genre, protagonist and 金手指 in its first chapters, since that is where
+    readers decide whether to continue. Those chapters answer most of what a
+    preference query asks. The spread tail is still needed — pacing (慢热) and
+    whether a setup persists can only be judged by contrasting early against late.
+
+    The finale is skipped: for 69% of this corpus the last chapters are 全书完,
+    番外 or 作者感言 rather than narrative.
 
     ``src/evidence.py`` reads this same function to sample judge evidence from
     chapters the profile did *not* use, which is what keeps evaluation
@@ -134,10 +143,20 @@ def profile_chapter_indices(
         return []
     usable = max(1, int(chapter_count * (1.0 - finale_skip)))
     count = min(samples, usable)
-    if count == 1:
-        return [0]
-    step = (usable - 1) / (count - 1)
-    return sorted({int(round(index * step)) for index in range(count)})
+
+    head = list(range(min(opening, count, usable)))
+    remaining = count - len(head)
+    if remaining <= 0:
+        return head
+
+    start = len(head)
+    if usable - start <= remaining:
+        return sorted(set(head + list(range(start, min(start + remaining, usable)))))
+
+    span = usable - 1 - start
+    step = span / remaining
+    tail = [min(int(round(start + (index + 1) * step)), usable - 1) for index in range(remaining)]
+    return sorted(set(head + tail))
 
 
 def substantive_chapter_indices(chapters: Sequence[Any], min_chars: int = MIN_CHAPTER_CHARS) -> list[int]:

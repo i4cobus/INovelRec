@@ -35,23 +35,59 @@ app = typer.Typer(add_completion=False)
 console = Console(width=180)
 
 
+def load_pinned_evidence(sheet_path: Path) -> dict[tuple[str, str], str]:
+    """Read the evidence a human actually saw, keyed by (query_id, novel_id).
+
+    Evidence is regenerated from the raw text on each run, and it depends on which
+    chapters the *profile* sampled — so changing the profile silently changes it.
+    That is what happened here: an annotation sheet was filled in, the profile was
+    then revised, and the judge went on to read six different chapters than the
+    annotator had. Agreement measured across two different sets of excerpts is not
+    agreement at all, and three kappa runs had to be thrown away.
+
+    Once a sheet exists it is the authority for those pairs. The judge reuses it
+    verbatim rather than recomputing.
+    """
+
+    if not sheet_path.exists():
+        return {}
+    sheet = pd.read_csv(sheet_path)
+    if not {"query_id", "novel_id", "evidence"}.issubset(sheet.columns):
+        return {}
+    return {
+        (str(row.query_id), str(row.novel_id)): str(row.evidence)
+        for row in sheet.itertuples()
+        if isinstance(row.evidence, str) and row.evidence.strip()
+    }
+
+
 def build_tasks(
     results: pd.DataFrame,
     queries_by_id: dict[str, dict],
     texts: dict[str, str],
     windows: int,
     window_chars: int,
-) -> tuple[list[JudgeTask], int]:
-    """Build one task per unique (query_id, novel_id); returns tasks and skip count."""
+    pinned: dict[tuple[str, str], str] | None = None,
+) -> tuple[list[JudgeTask], int, int]:
+    """Build one task per unique (query_id, novel_id).
 
+    Returns tasks, the number skipped, and how many reused pinned evidence.
+    """
+
+    pinned = pinned or {}
     tasks: list[JudgeTask] = []
     skipped = 0
+    reused = 0
     for (query_id, novel_id), group in results.groupby(["query_id", "novel_id"], sort=False):
-        text = texts.get(str(novel_id))
-        if not text:
-            skipped += 1
-            continue
-        evidence = sample_judge_evidence(text, str(novel_id), windows=windows, window_chars=window_chars)
+        evidence = pinned.get((str(query_id), str(novel_id)), "")
+        if evidence:
+            reused += 1
+        else:
+            text = texts.get(str(novel_id))
+            if not text:
+                skipped += 1
+                continue
+            evidence = sample_judge_evidence(text, str(novel_id), windows=windows, window_chars=window_chars)
         if not evidence:
             skipped += 1
             continue
@@ -67,7 +103,7 @@ def build_tasks(
                 unwanted=meta.get("unwanted", []),
             )
         )
-    return tasks, skipped
+    return tasks, skipped, reused
 
 
 @app.command()
@@ -76,6 +112,7 @@ def main(
     eval_file: Path = typer.Option(Path("eval/eval_queries.jsonl"), help="Evaluation query JSONL, for wanted/unwanted."),
     inventory: Path = typer.Option(DEFAULT_OUTPUT_PATH, help="Stage 1 inventory parquet, used to read raw text."),
     out: Path = typer.Option(Path("eval/results/eval_results_judged.csv"), help="Judged output CSV."),
+    sheet: Path = typer.Option(Path("eval/manual_judgements_sheet.csv"), help="Annotation sheet; its evidence is reused verbatim so judge and human read the same text."),
     judge_model: str = typer.Option(..., help="Judge model name as the endpoint expects it."),
     base_url: str = typer.Option(DEFAULT_BASE_URL, help="OpenAI-compatible base URL. Env: INOVELREC_LLM_BASE_URL."),
     budget_usd: float = typer.Option(200.0, help="Hard spend cap. The run refuses to start if the estimate exceeds it."),
@@ -101,9 +138,10 @@ def main(
         query.query_id: {"wanted": query.wanted, "unwanted": query.unwanted}
         for query in load_eval_queries(eval_file)
     }
+    pinned = load_pinned_evidence(sheet)
     novel_ids = {str(value) for value in results["novel_id"].unique()}
     texts = load_raw_text_lookup(inventory, novel_ids)
-    tasks, skipped = build_tasks(results, queries_by_id, texts, windows, window_chars)
+    tasks, skipped, reused = build_tasks(results, queries_by_id, texts, windows, window_chars, pinned=pinned)
 
     prices = PricePerMillion(input_usd=price_input, output_usd=price_output)
     budget = BudgetGuard(limit_usd=budget_usd, prices=prices)
@@ -111,6 +149,7 @@ def main(
     console.print(f"Result rows (rank <= {top_k}): {len(results)}")
     console.print(f"Unique (query, novel) pairs : {len(tasks)}  [deduplicated across variants]")
     console.print(f"Skipped (no readable text)  : {skipped}")
+    console.print(f"Reusing annotator's evidence: {reused}  [判定与人工基于同一份材料]")
     console.print(f"Worst-case estimate         : ${budget.estimate_usd(len(tasks)):.2f} of ${budget_usd:.2f}")
     console.print("[dim]Cached pairs cost nothing; the real charge is usually well below this.[/dim]")
 

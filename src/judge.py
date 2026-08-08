@@ -28,7 +28,7 @@ from typing import Any, Callable, Protocol
 from src.config import DATA_DIR
 from src.http_matcher import TokenUsage
 
-JUDGE_PROMPT_VERSION = "judge_v1"
+JUDGE_PROMPT_VERSION = "judge_v2"
 JUDGE_CACHE_PATH = DATA_DIR / "cache" / "judge_cache.jsonl"
 DEFAULT_JUDGE_MAX_TOKENS = 300
 DEFAULT_JUDGE_WORKERS = 8
@@ -113,24 +113,50 @@ def normalize_confidence(value: str) -> str:
 
 
 def build_judge_prompt(task: JudgeTask) -> str:
-    """Build a JSON-only grading prompt over independently sampled evidence."""
+    """Build a JSON-only grading prompt over independently sampled evidence.
 
-    wanted = "、".join(task.wanted) if task.wanted else "（未显式列出）"
+    v2 fixes three failure modes measured against 200 human labels with v1
+    (relevance weighted kappa 0.244):
+
+    * The judge scored 0 on 40% of items against the human's 12.5%, marking 37 of
+      the human's 118 "highly relevant" as "not relevant". "Do not invent details"
+      was being read as "score low when unsure", so confidence and label are now
+      separated explicitly: thin evidence lowers *confidence*, never the label.
+    * It barely used the middle label (14 items against the human's 57), so each
+      label carries an operational test rather than a one-word gloss.
+    * It missed 21 of the human's 34 constraint violations. "Only when there is
+      evidence it violates" set the burden of proof too high. Presence of the
+      excluded element now suffices, and the asymmetry is stated outright: the
+      excerpts sample a long novel, so presence is evidence while absence is not.
+    """
+
+    wanted = "、".join(task.wanted) if task.wanted else "（未显式列出，按 query 字面理解）"
     unwanted = "、".join(task.unwanted) if task.unwanted else "（无）"
     return (
-        "你是中文网络小说推荐结果的评审员。\n"
-        "请只依据下方提供的正文摘录判断这本小说是否符合用户偏好。\n"
-        "摘录是从原文不同位置随机截取的片段，不是完整作品，信息有限时请降低置信度。\n"
-        "不要臆测剧情、人气、作者、评分或完结状态。只输出合法 JSON，不要 markdown。\n\n"
+        "你是中文网络小说推荐结果的评审员。下面给出一本小说的作者简介和若干段正文摘录，"
+        "请判断它是否符合用户偏好。\n\n"
+        "【最重要的两条原则】\n"
+        "1. 摘录只是全书的极小一部分。出现即证据，未出现不算证据——摘录里没提到某个要素，"
+        "不能据此推断全书没有它。\n"
+        "2. 证据不足时请降低 judge_confidence，不要因此降低 relevance_label。"
+        "按摘录所能支持的最合理判断打分，而不是因为看不全就打低分。\n\n"
+        "【relevance_label 判据】\n"
+        "2 = 高度相关：摘录体现了正向要求中的主要部分（题材、设定、主角类型、氛围等），"
+        "一个抱着这条偏好来找书的读者会认为「就是它」。\n"
+        "1 = 部分相关：题材大方向对但侧重不同，或只满足部分要求，读者会觉得「沾边但不完全是」。\n"
+        "0 = 不相关：题材或核心设定与要求明显不符。\n"
+        "注意：检索结果多数应落在 1 或 2，只有明显跑题才给 0。\n\n"
+        "【constraint_violation 判据】\n"
+        "true = 摘录中出现了负向排除的要素即可判定，无需判断它是否为全书主线。\n"
+        "  例：排除「系统」而摘录出现系统面板／任务奖励；排除「穿越」而主角来自现代；"
+        "排除「后宫」而出现多位女性伴侣。\n"
+        "false = 摘录中没有出现该要素。负向排除为「（无）」时一律 false。\n\n"
         f"用户偏好：{task.query}\n"
         f"正向要求：{wanted}\n"
         f"负向排除：{unwanted}\n"
         f"候选标题：{task.title}\n"
         f"正文摘录：\n{task.evidence}\n\n"
-        "评分标准：\n"
-        "relevance_label = 2 高度相关；1 部分相关；0 不相关\n"
-        "constraint_violation = true 当且仅当摘录中有证据表明它违反了负向排除项\n\n"
-        "输出 JSON：\n"
+        "只输出 JSON，不要 markdown，不要 JSON 之外的解释：\n"
         '{"relevance_label":0,"constraint_violation":false,'
         '"judge_confidence":"high|medium|low","reason":"一句话依据"}'
     )

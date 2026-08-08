@@ -261,3 +261,27 @@ def test_sampling_stops_short_of_the_tail_in_both_modes() -> None:
     assert max(window_fractions(10)) <= 0.95
     assert window_fractions(1) == [0.0]
     assert window_fractions(0) == []
+
+
+def test_opening_chapters_are_sampled_densely() -> None:
+    """黄金三章: a web novel states genre, protagonist and 金手指 up front."""
+
+    indices = profile_chapter_indices(2733, samples=10)
+
+    assert indices[:4] == [0, 1, 2, 3], "the opening block must be contiguous"
+    assert len(indices) == 10
+    assert max(indices) < int(2733 * 0.95), "the finale is still skipped"
+    assert len(set(indices[4:])) == 6, "the tail must still spread"
+
+
+def test_opening_block_shrinks_gracefully_for_short_books() -> None:
+    assert profile_chapter_indices(3, samples=10) == [0, 1]
+    assert profile_chapter_indices(1, samples=10) == [0]
+    assert profile_chapter_indices(12, samples=10)[:4] == [0, 1, 2, 3]
+
+
+def test_tail_still_reaches_the_late_book() -> None:
+    """Pacing (慢热) can only be judged by contrasting early against late."""
+
+    indices = profile_chapter_indices(2733, samples=10)
+    assert max(indices) > 2733 * 0.9

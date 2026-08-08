@@ -319,3 +319,50 @@ def test_evidence_excerpts_end_on_sentence_boundaries() -> None:
         body = block.strip().splitlines()[-1].strip()
         if body:
             assert body.endswith(("。", "！", "？", "…", "”", "』", "」")), body[-30:]
+
+
+def test_pinned_evidence_keeps_judge_and_human_on_the_same_text(tmp_path: Path) -> None:
+    """Regenerating evidence after a profile change silently desynchronised them."""
+
+    import pandas as pd
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("judge_eval", "scripts/09_judge_eval.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    sheet_path = tmp_path / "sheet.csv"
+    pd.DataFrame(
+        [{"query_id": "q001", "novel_id": "n0", "evidence": "人工看过的那份摘录"}]
+    ).to_csv(sheet_path, index=False)
+
+    pinned = module.load_pinned_evidence(sheet_path)
+    results = pd.DataFrame(
+        [{"query_id": "q001", "novel_id": "n0", "query": "凡人流", "title_guess": "《书》", "rank": 1}]
+    )
+    tasks, skipped, reused = module.build_tasks(
+        results, {"q001": {"wanted": [], "unwanted": []}}, {"n0": "完全不同的原文" * 500}, 4, 200, pinned=pinned
+    )
+
+    assert reused == 1 and skipped == 0
+    assert tasks[0].evidence == "人工看过的那份摘录"
+
+
+def test_pairs_absent_from_the_sheet_still_get_fresh_evidence(tmp_path: Path) -> None:
+    import importlib.util
+
+    import pandas as pd
+
+    spec = importlib.util.spec_from_file_location("judge_eval", "scripts/09_judge_eval.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    text = "".join(f"第{i:04d}章 标题\n" + "正文内容。" * 200 + "\n" for i in range(1, 60))
+    results = pd.DataFrame(
+        [{"query_id": "q001", "novel_id": "n9", "query": "凡人流", "title_guess": "《书》", "rank": 1}]
+    )
+    tasks, skipped, reused = module.build_tasks(
+        results, {"q001": {"wanted": [], "unwanted": []}}, {"n9": text}, 4, 200, pinned={}
+    )
+
+    assert reused == 0 and skipped == 0 and tasks[0].evidence

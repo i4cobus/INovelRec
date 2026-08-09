@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 DEFAULT_LLM_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
-PROMPT_VERSION = "stage4_llm_rerank_v3_transformers_only"
+PROMPT_VERSION = "stage4_llm_rerank_v4_no_retrieval_anchor"
 
 
 @dataclass(frozen=True)
@@ -67,8 +67,14 @@ def build_match_prompt(
     """Build a compact JSON-only scoring prompt."""
 
     title = str(candidate.get("title_guess", ""))
-    semantic_score = float(candidate.get("score", 0.0))
     profile = profile_text[:max_profile_chars]
+    # The retrieval score is deliberately NOT shown. It carries no information about
+    # the book that the profile does not, and the model anchors on it hard: holding
+    # the candidates fixed and varying only this number moved the median output to
+    # exactly the injected value (0.05 -> 0.05, 0.50 -> 0.50) and the mean from 0.123
+    # to 0.655. rank.py then blends 0.40*semantic + 0.50*llm_match, so an llm_match
+    # that partly restates semantic makes the weighting degenerate — it double counts
+    # one signal and calls it two.
     return (
         "You are a local Chinese web novel recommendation feature extractor.\n"
         "Score how well the candidate matches the user preference using only the provided profile text.\n"
@@ -77,7 +83,6 @@ def build_match_prompt(
         "If evidence is limited, lower confidence.\n\n"
         f"User preference: {query}\n"
         f"Candidate title: {title}\n"
-        f"Semantic score: {semantic_score:.6f}\n"
         f"Profile text:\n{profile}\n\n"
         "Expected JSON:\n"
         '{"llm_match_score":0.0,"confidence":"high|medium|low",'

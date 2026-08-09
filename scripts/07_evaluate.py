@@ -59,6 +59,13 @@ def result_row(query: EvalQuery, variant: str, rank: int, item: dict[str, Any]) 
         "matched_query_count": item.get("matched_query_count", ""),
         "retrieval_sources": ",".join(item.get("retrieval_sources", [])) if isinstance(item.get("retrieval_sources"), list) else item.get("retrieval_sources", ""),
         "llm_selection_reasons": ",".join(item.get("llm_selection_reasons", [])) if isinstance(item.get("llm_selection_reasons"), list) else item.get("llm_selection_reasons", ""),
+        # Exported because their absence was once read as the teacher never filling
+        # them. It fills violated_preferences on 78% of scored candidates; the column
+        # simply was not written out, and a missing column looks exactly like an empty
+        # one. Any field the analysis reasons about has to survive to the results file.
+        "violated_preferences": "|".join(item.get("violated_preferences", [])) if isinstance(item.get("violated_preferences"), list) else item.get("violated_preferences", ""),
+        "matched_preferences": "|".join(item.get("matched_preferences", [])) if isinstance(item.get("matched_preferences"), list) else item.get("matched_preferences", ""),
+        "risk_flags": "|".join(item.get("risk_flags", [])) if isinstance(item.get("risk_flags"), list) else item.get("risk_flags", ""),
         "reason": item.get("reason", ""),
         "anchor_titles": "|".join(query.anchor_titles),
         "wanted": "|".join(query.wanted),

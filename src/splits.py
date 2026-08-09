@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -106,6 +106,27 @@ def filter_to_fold(frame: pd.DataFrame, fold_lookup: dict[str, str], fold: Fold)
         raise ValueError("Frame must carry a novel_id column to be filtered by fold")
     keep = frame["novel_id"].astype(str).map(lambda value: fold_lookup.get(value) == fold)
     return frame[keep.fillna(False)]
+
+
+def filter_candidates_to_fold(
+    candidates: list[dict[str, Any]],
+    fold_lookup: dict[str, str],
+    fold: Fold,
+) -> list[dict[str, Any]]:
+    """Keep only retrieved candidates whose novel belongs to ``fold``, in order.
+
+    Seeds being train-fold is not enough. Candidates come from FAISS over the whole
+    corpus, so an unfiltered pool puts eval-fold profiles into training — and the
+    fold split exists precisely to separate "learned to retrieve" from "memorised
+    the book". Apply this when *building training data*; never at inference, where
+    the model must handle any novel.
+
+    A novel missing from the lookup is dropped rather than kept: an id with no fold
+    assignment has not been through ``12_build_splits.py``, and guessing on it is
+    how leakage gets in.
+    """
+
+    return [item for item in candidates if fold_lookup.get(str(item.get("novel_id", ""))) == fold]
 
 
 def leakage_report(train_ids: set[str], eval_ids: set[str], fold_lookup: dict[str, str]) -> dict[str, int]:

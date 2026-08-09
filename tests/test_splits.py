@@ -103,3 +103,30 @@ def test_leakage_report_counts_violations() -> None:
     report = leakage_report({"a", "b"}, {"b"}, lookup)
     assert report["overlap"] == 1
     assert report["train_ids_in_eval_fold"] == 1
+
+
+def test_candidate_pool_is_restricted_to_the_training_fold() -> None:
+    """Seeds being train-fold is not enough; FAISS retrieves from the whole corpus.
+
+    An unfiltered pool puts eval-fold profiles into training, and the fold split is
+    what separates "learned to retrieve" from "memorised the book".
+    """
+
+    from src.splits import filter_candidates_to_fold
+
+    lookup = {"a": "train", "b": "eval", "c": "train"}
+    candidates = [{"novel_id": "a"}, {"novel_id": "b"}, {"novel_id": "c"}]
+
+    kept = filter_candidates_to_fold(candidates, lookup, "train")
+
+    assert [item["novel_id"] for item in kept] == ["a", "c"], "order must be preserved"
+
+
+def test_a_novel_with_no_fold_assignment_is_dropped_not_kept() -> None:
+    """An unassigned id has not been through 12_build_splits.py; guessing leaks."""
+
+    from src.splits import filter_candidates_to_fold
+
+    kept = filter_candidates_to_fold([{"novel_id": "unknown"}], {"a": "train"}, "train")
+
+    assert kept == []

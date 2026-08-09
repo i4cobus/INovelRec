@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from src.config import DATA_DIR
 from src.preferences import StructuredPreference, parse_preference_query
+
+
+def sha256_text(text: str) -> str:
+    """Hash helper, duplicated from ``rank`` to keep this module free of pandas."""
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -74,6 +83,49 @@ def append_unique_query(queries: list[ExpandedQuery], query: ExpandedQuery) -> N
         queries.append(query)
 
 
+EXPANSION_PROMPT_VERSION = "expand_v1"
+EXPANSION_CACHE_PATH = DATA_DIR / "cache" / "query_expansion_cache.jsonl"
+
+
+def expansion_cache_key(raw_query: str, llm_model: str, max_queries: int) -> str:
+    """Stable key for one expansion. Mirrors the LLM rerank cache's shape."""
+
+    payload = {
+        "query_hash": sha256_text(raw_query),
+        "llm_model": llm_model,
+        "max_queries": max_queries,
+        "prompt_version": EXPANSION_PROMPT_VERSION,
+    }
+    return sha256_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
+def load_expansion_cache(cache_path: Path = EXPANSION_CACHE_PATH) -> dict[str, str]:
+    """Load cached raw expansion responses keyed by cache_key."""
+
+    if not cache_path.exists():
+        return {}
+    cache: dict[str, str] = {}
+    for line in cache_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        key = str(item.get("cache_key", ""))
+        if key:
+            cache[key] = str(item.get("response", ""))
+    return cache
+
+
+def append_expansion_cache(cache_path: Path, key: str, response: str) -> None:
+    """Append one expansion response. Append-only JSONL, last write wins on load."""
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with cache_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"cache_key": key, "response": response}, ensure_ascii=False) + "\n")
+
+
 def build_expanded_queries(
     raw_query: str,
     structured_preference: StructuredPreference | None,
@@ -81,8 +133,23 @@ def build_expanded_queries(
     use_llm_expansion: bool = True,
     use_domain_hints: bool = True,
     max_expanded_queries: int = 5,
+    expansion_cache: dict[str, str] | None = None,
+    llm_model: str = "",
+    cache_path: Path = EXPANSION_CACHE_PATH,
 ) -> list[ExpandedQuery]:
-    """Build retrieval query variants. The raw query is always included."""
+    """Build retrieval query variants. The raw query is always included.
+
+    The LLM response is cached because vLLM's greedy decoding is not reproducible
+    across runs: batch composition shifts the logits, and a near-tie flips. One
+    flipped token rewrites an expanded query, which changes the FAISS pool, which
+    changes which candidates reach the reranker. Measured across two runs of the
+    same 49 queries, only 258 of 366 shared candidates kept the same semantic
+    score and just 16 of 49 top-10 sets were identical — noise large enough to
+    swamp the effect any training run would be trying to show.
+
+    Pass ``expansion_cache`` (from :func:`load_expansion_cache`) to make a run
+    reproducible. Without it behaviour is unchanged, so demos stay live.
+    """
 
     if max_expanded_queries <= 0:
         raise ValueError("max_expanded_queries must be positive")
@@ -96,7 +163,14 @@ def build_expanded_queries(
 
     if use_llm_expansion and llm_provider is not None:
         try:
-            llm_text = llm_provider.expand_queries(raw_query=raw_query, max_queries=max_expanded_queries - 1)
+            key = expansion_cache_key(raw_query, llm_model, max_expanded_queries - 1) if expansion_cache is not None else ""
+            if expansion_cache is not None and key in expansion_cache:
+                llm_text = expansion_cache[key]
+            else:
+                llm_text = llm_provider.expand_queries(raw_query=raw_query, max_queries=max_expanded_queries - 1)
+                if expansion_cache is not None:
+                    expansion_cache[key] = llm_text
+                    append_expansion_cache(cache_path, key, llm_text)
             for query in parse_llm_expanded_queries(llm_text):
                 append_unique_query(queries, query)
                 if len(queries) >= max_expanded_queries:

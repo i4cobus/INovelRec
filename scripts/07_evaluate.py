@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -23,9 +24,14 @@ from src.evaluation import (
 )
 from src.backends import create_matcher
 from src.config import DEFAULT_OUTPUT_PATH
-from src.llm_matcher import DEFAULT_LLM_MODEL
+from src.llm_matcher import DEFAULT_LLM_MODEL, PROMPT_VERSION
 from src.preferences import parse_preference_query
-from src.query_expansion import ExpandedQuery, build_expanded_queries
+from src.query_expansion import (
+    EXPANSION_PROMPT_VERSION,
+    ExpandedQuery,
+    build_expanded_queries,
+    load_expansion_cache,
+)
 from src.rank import load_profile_text_lookup, rerank_candidates_with_llm, resolve_llm_candidate_k
 from src.search import load_faiss_index, load_id_map, multi_query_semantic_search, semantic_search
 from src.vector_index import DEFAULT_ID_MAP_PATH, DEFAULT_INDEX_PATH, DEFAULT_PROFILES_PATH
@@ -79,9 +85,13 @@ def run_full(
     llm_candidate_k: int,
     llm_model: str,
     fallback_policy: str,
+    expansion_cache: dict[str, str],
 ) -> list[dict[str, Any]]:
     """Run query expansion, multi-query retrieval, and local LLM reranking."""
 
+    # Expansion is cached so a re-run reproduces its candidate pool. vLLM's greedy
+    # decoding is not bitwise stable across runs, and one flipped token rewrites an
+    # expanded query, changing retrieval and therefore the whole comparison.
     expanded_queries = build_expanded_queries(
         raw_query=query.query,
         structured_preference=parse_preference_query(query.query),
@@ -89,6 +99,8 @@ def run_full(
         use_llm_expansion=True,
         use_domain_hints=True,
         max_expanded_queries=5,
+        expansion_cache=expansion_cache,
+        llm_model=llm_model,
     )
     candidates = multi_query_semantic_search(
         expanded_queries=expanded_queries,
@@ -195,6 +207,7 @@ def main(
 
     started = time.perf_counter()
     queries = load_eval_queries(eval_file)
+    expansion_cache = load_expansion_cache()
     resolved_device = resolve_device(device)
     embedder = load_embedding_model(embedding_model, device=resolved_device)
     faiss_index = load_faiss_index(index)
@@ -226,10 +239,34 @@ def main(
                 llm_candidate_k=llm_candidate_k,
                 llm_model=llm_model,
                 fallback_policy=fallback_policy,
+                expansion_cache=expansion_cache,
             )
             rows.extend(result_row(query, "full_llm_rerank", rank, item) for rank, item in enumerate(full[:top_k], start=1))
 
+    # The configuration goes next to the results. Reading llm_candidate_k back out
+    # of a cache line count once cost a full re-run and a wrong conclusion about
+    # nondeterminism; a results file that cannot state how it was produced cannot be
+    # compared to another one.
+    run_config = {
+        "top_k": top_k,
+        "candidate_k": candidate_k,
+        "llm_candidate_k": llm_candidate_k,
+        "top_k_per_query": top_k_per_query,
+        "fallback_policy": fallback_policy,
+        "embedding_model": embedding_model,
+        "llm_model": llm_model,
+        "backend": backend,
+        "mode": mode,
+        "queries": len(queries),
+        "expansion_prompt_version": EXPANSION_PROMPT_VERSION,
+        "llm_prompt_version": PROMPT_VERSION,
+    }
+    config_path = out_dir / "eval_run_config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(run_config, ensure_ascii=False, indent=2), encoding="utf-8")
+
     csv_path, jsonl_path = write_eval_outputs(rows, out_dir)
+    console.print(f"Wrote config: {config_path}")
     console.print(f"Wrote CSV: {csv_path}")
     console.print(f"Wrote JSONL: {jsonl_path}")
     anchor_folds = load_anchor_folds(queries, DEFAULT_OUTPUT_PATH, splits)

@@ -256,3 +256,70 @@ def test_a_truncated_response_is_distinguishable_from_an_empty_one() -> None:
     assert looks_truncated('{"queries":[{"query":"玄幻 热血 不系统","shape":"kw"')
     assert not looks_truncated('{"queries":[]}')
     assert not looks_truncated("<think>想想 {要点}</think>" + '{"queries":[]}')
+
+
+def _verdict(**over):
+    from src.llm_matcher import LLMMatchResult
+
+    base = dict(
+        llm_match_score=0.65, confidence="medium",
+        matched_preferences=["魔法", "灾害设定"],
+        violated_preferences=["不要系统"],
+        risk_flags=["未明确提及是否包含系统", "篇幅较短"],
+        reason="作品包含魔法和灾害设定，但未明确提及系统元素，匹配度中等",
+    )
+    base.update(over)
+    return LLMMatchResult(**base)
+
+
+def test_rule_override_rewrites_the_prose_so_the_target_agrees_with_itself() -> None:
+    """A target must not report a violation while explaining there is none.
+
+    A real sample carried violated_preferences ["系统"] beside reason "未明确提及系统
+    元素". Training on it teaches that the structured fields and the explanation are
+    unrelated — the opposite of what Stage 5 consumes.
+    """
+
+    from src.query_synthesis import align_fields_with_rule
+
+    aligned = align_fields_with_rule(_verdict(), ["系统"], violates=True)
+
+    assert aligned["violated_preferences"] == ["系统"]
+    assert "未明确提及" not in aligned["reason"]
+    assert "违反排除项" in aligned["reason"]
+    # The flag that speculated about the exclusion is gone; the unrelated one stays.
+    assert aligned["risk_flags"] == ["篇幅较短"]
+
+
+def test_rule_override_the_other_way_states_the_constraint_is_satisfied() -> None:
+    from src.query_synthesis import align_fields_with_rule
+
+    aligned = align_fields_with_rule(_verdict(), ["系统"], violates=False)
+
+    assert aligned["violated_preferences"] == []
+    assert "满足排除项" in aligned["reason"]
+    assert "未明确提及是否包含系统" not in aligned["risk_flags"]
+
+
+def test_relevance_fields_are_the_teachers_and_are_left_alone() -> None:
+    """The rule read the novel for one word; it knows nothing about relevance."""
+
+    from src.query_synthesis import align_fields_with_rule
+
+    aligned = align_fields_with_rule(_verdict(), ["系统"], violates=True)
+
+    assert aligned["llm_match_score"] == 0.65
+    assert aligned["confidence"] == "medium"
+    assert aligned["matched_preferences"] == ["魔法", "灾害设定"]
+
+
+def test_a_reason_that_never_mentioned_the_exclusion_survives_a_clean_verdict() -> None:
+    """Only prose that talks about the exclusion is the rule's business."""
+
+    from src.query_synthesis import align_fields_with_rule
+
+    verdict = _verdict(reason="世界观扎实、节奏明快", risk_flags=["篇幅较短"], violated_preferences=[])
+    aligned = align_fields_with_rule(verdict, ["系统"], violates=False)
+
+    assert aligned["reason"] == "世界观扎实、节奏明快"
+    assert aligned["risk_flags"] == ["篇幅较短"]

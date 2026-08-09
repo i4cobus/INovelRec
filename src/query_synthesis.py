@@ -30,9 +30,14 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any
+from typing import Any, Literal
 
-from src.preferences import IN_TEXT_NEGATIVES, constraint_violation_by_rule, is_rule_checkable
+from src.preferences import (
+    IN_TEXT_NEGATIVES,
+    META_LABEL_NEGATIVES,
+    constraint_violation_by_rule,
+    is_rule_checkable,
+)
 
 SYNTHESIS_PROMPT_VERSION = "querysynth_v1"
 
@@ -130,7 +135,36 @@ def is_self_contradictory(query: str, wanted: list[str], unwanted: list[str]) ->
     return False
 
 
-def build_synthesis_prompt(task: SynthesisTask, shapes: tuple[str, ...] = SHAPES, count: int = DEFAULT_QUERIES_PER_BOOK) -> str:
+ExclusionKind = Literal["in_text", "meta"]
+
+
+def exclusion_instruction(kind: ExclusionKind) -> str:
+    """The clause steering which vocabulary the exclusion is drawn from.
+
+    Two kinds, because they train different things. ``in_text`` terms carry a
+    verifiable reward — the rule can read the novel and check them. ``meta`` terms
+    (爽文 / 圣母 / 小白 …) cannot be checked by any rule, so they are SFT material
+    only; but they are what readers actually write, and they are 42 of the 59
+    evaluation queries. Generating only the verifiable kind would leave the model
+    with almost no training signal for the arm that most of evaluation measures.
+    """
+
+    if kind == "in_text":
+        return f"   **必须生成至少一条 violates**，且负向词优先从这个表里选：{'、'.join(sorted(IN_TEXT_NEGATIVES))}"
+    return (
+        "   负向词必须从这个表里选（这些是读者对**写法**的评价，不是情节名词）："
+        f"{'、'.join(sorted(META_LABEL_NEGATIVES))}\n"
+        "   这类排除项无法用关键词规则判定，所以**不要**臆断这本书是否违反——"
+        "如实按画像判断即可。"
+    )
+
+
+def build_synthesis_prompt(
+    task: SynthesisTask,
+    shapes: tuple[str, ...] = SHAPES,
+    count: int = DEFAULT_QUERIES_PER_BOOK,
+    exclusion_kind: ExclusionKind = "in_text",
+) -> str:
     """Ask the teacher what a reader would search for to reach this novel.
 
     The prompt requests one query the book satisfies and one it violates, because
@@ -139,7 +173,8 @@ def build_synthesis_prompt(task: SynthesisTask, shapes: tuple[str, ...] = SHAPES
     """
 
     shape_lines = "\n".join(f"  - {shape}: {SHAPE_INSTRUCTIONS[shape]}" for shape in shapes)
-    checkable = "、".join(sorted(IN_TEXT_NEGATIVES))
+    example = "玄幻 升级流 热血 不系统" if exclusion_kind == "in_text" else "玄幻 升级流 热血 不圣母"
+    example_term = "系统" if exclusion_kind == "in_text" else "圣母"
     return (
         "你在为中文网络小说推荐系统构造训练数据。下面给出一本小说的画像，"
         "请反推：什么样的读者需求会指向这本书。\n\n"
@@ -149,12 +184,12 @@ def build_synthesis_prompt(task: SynthesisTask, shapes: tuple[str, ...] = SHAPES
         "2. 每条 query 都要带一个负向排除项（「不XX」），并标明这本书是否**违反**它：\n"
         "   - satisfies: 这本书**不含**该排除项 —— 它是这条 query 的正例\n"
         "   - violates:  这本书**明确含有**该排除项 —— 它是这条 query 的负例\n"
-        f"   **必须生成至少一条 violates**，且负向词优先从这个表里选：{checkable}\n"
+        f"{exclusion_instruction(exclusion_kind)}\n"
         "3. query 只描述读者需求，**不要出现任何书名**——写出书名会让检索退化成字符串匹配。\n"
         "4. 只依据画像判断，不要臆测画像里没有的内容。\n\n"
         "只输出 JSON，不要 markdown：\n"
-        '{"queries":[{"query":"玄幻 升级流 热血 不圣母","shape":"kw",'
-        '"wanted":["玄幻","升级流"],"unwanted":["圣母"],"seed_satisfies_constraint":true}]}'
+        f'{{"queries":[{{"query":"{example}","shape":"kw",'
+        f'"wanted":["玄幻","升级流"],"unwanted":["{example_term}"],"seed_satisfies_constraint":true}}]}}'
     )
 
 
@@ -286,6 +321,53 @@ def leaks_positive_side(query: SynthesizedQuery, reserved: list[SynthesizedQuery
         if len(mine & theirs) / min(len(mine), len(theirs)) >= threshold:
             return True
     return False
+
+
+ConstraintSource = Literal["rule", "teacher"]
+
+
+def mentions_any(text: str, terms: list[str] | tuple[str, ...]) -> bool:
+    """Whether a generated field talks about any of the exclusion terms."""
+
+    return any(term and term in text for term in terms)
+
+
+def align_fields_with_rule(
+    result: Any,
+    terms: list[str],
+    violates: bool,
+    *,
+    matched: list[str] | None = None,
+) -> dict[str, Any]:
+    """Rewrite a teacher verdict so its three constraint fields agree.
+
+    Overwriting ``violated_preferences`` from the rule while leaving the teacher's
+    prose intact produces targets that contradict themselves — one real sample
+    reported ``violated_preferences: ["系统"]`` beside ``reason: "未明确提及系统元素"``
+    and ``risk_flags: ["未明确提及是否包含系统"]``. Training on that teaches the model
+    that the structured fields and the explanation are unrelated, which is the
+    opposite of what a reranker whose output feeds Stage 5 needs.
+
+    So when the rule decides, every field that talks about the exclusion is rebuilt
+    from the rule's verdict. Fields that talk about anything else are the teacher's
+    and are left alone: the rule knows about the exclusion, not about relevance.
+    """
+
+    payload = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+    matched_terms = matched if matched is not None else list(payload.get("matched_preferences", []))
+
+    payload["violated_preferences"] = list(terms) if violates else []
+    # Drop only the flags that speculate about the exclusion; the rule has read the
+    # whole novel and its verdict supersedes them. Other flags are unrelated.
+    payload["risk_flags"] = [flag for flag in payload.get("risk_flags", []) if not mentions_any(str(flag), terms)]
+
+    reason = str(payload.get("reason", ""))
+    if mentions_any(reason, terms) or violates:
+        listed = "、".join(terms)
+        head = f"符合{'、'.join(matched_terms[:3])}；" if matched_terms else ""
+        verdict = f"但正文中「{listed}」出现频繁，违反排除项。" if violates else f"正文中「{listed}」几乎不出现，满足排除项。"
+        payload["reason"] = head + verdict
+    return payload
 
 
 def deduplicate(

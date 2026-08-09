@@ -77,11 +77,19 @@ def main(
         "silently yielded nothing; 1200 drops that to 8% and roughly doubles the query count.",
     ),
     seed: int = typer.Option(20260809, help="Sampling seed."),
+    exclusion_kind: str = typer.Option(
+        "in_text",
+        help="Which exclusion vocabulary the teacher draws from: in_text (rule-checkable, "
+        "carries a verifiable reward) or meta (爽文/圣母/小白 …, SFT material only but 42 of "
+        "the 59 evaluation queries).",
+    ),
     verify_constraints: bool = typer.Option(True, help="Check rule-checkable claims against the novel text."),
     overwrite: bool = typer.Option(False, help="Overwrite an existing output file."),
 ) -> None:
     """Synthesise training queries and write them as JSONL."""
 
+    if exclusion_kind not in {"in_text", "meta"}:
+        raise typer.BadParameter("exclusion-kind must be in_text or meta")
     if out.exists() and not overwrite:
         raise typer.BadParameter(f"Output already exists: {out}. Use --overwrite to replace it.")
 
@@ -98,7 +106,7 @@ def main(
     console.print(f"Reserved evaluation queries: {len(reserved)}")
 
     matcher = create_matcher(backend="http", model_name=model, base_url=base_url, max_workers=max_workers, max_new_tokens=max_new_tokens)
-    prompts = [(SynthesisTask(**{**task.__dict__}), build_synthesis_prompt(task, count=per_book)) for task in tasks]
+    prompts = [(SynthesisTask(**{**task.__dict__}), build_synthesis_prompt(task, count=per_book, exclusion_kind=exclusion_kind)) for task in tasks]
 
     generated = []
     failed = truncated = barren = 0

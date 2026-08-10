@@ -36,6 +36,47 @@ DEFAULT_OUTPUT = Path("data/checkpoints/sft-qwen3-4b")
 BASE_MODEL = "Qwen/Qwen3-4B-Base"
 
 
+TOKENIZER_FILES = ("tokenizer_config.json", "tokenizer.json", "vocab.json", "merges.txt")
+
+
+def copy_tokenizer_files(base_model: str, output_dir: Path) -> list[str]:
+    """Copy the base model's tokenizer into the checkpoint instead of re-serialising it.
+
+    ``tokenizer.save_pretrained`` writes transformers 5.x's format, which the vLLM
+    environment (pinned to transformers 4.57 by its own torch pin) cannot read:
+    ``extra_special_tokens`` is emitted as a list where 4.x indexes it as a dict, and
+    serving died with ``'list' object has no attribute 'keys'``. 5.x also moves
+    ``chat_template`` out to its own file and drops ``added_tokens_decoder``, both of
+    which 4.x expects inline.
+
+    Training never modifies the tokenizer — no tokens are added — so the base model's
+    files are exactly correct and are already in the older format. Verified: the
+    template 5.x wrote to ``chat_template.jinja`` is byte-identical to the base
+    model's inline one.
+    """
+
+    import shutil
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source = Path(base_model)
+    copied: list[str] = []
+    for name in TOKENIZER_FILES:
+        candidate = source / name
+        if not candidate.exists():
+            try:
+                from huggingface_hub import hf_hub_download
+
+                candidate = Path(hf_hub_download(base_model, name, local_files_only=True))
+            except Exception:  # noqa: BLE001 - an absent optional file is not fatal
+                continue
+        if candidate.exists():
+            shutil.copy(candidate, output_dir / name)
+            copied.append(name)
+    # 5.x may have written this alongside; leaving both is ambiguous.
+    (output_dir / "chat_template.jinja").unlink(missing_ok=True)
+    return copied
+
+
 @app.command()
 def main(
     samples_path: Path = typer.Option(DEFAULT_SAMPLES, "--samples", help="Assembled SFT samples (script 17)."),
@@ -137,7 +178,8 @@ def main(
     )
     result = trainer.train()
     trainer.save_model(str(output_dir))
-    tokenizer.save_pretrained(str(output_dir))
+    copied = copy_tokenizer_files(base_model, output_dir)
+    console.print(f"Tokenizer copied from {base_model}: {', '.join(copied)}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "sft_run_config.json").write_text(

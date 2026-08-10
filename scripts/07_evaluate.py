@@ -30,6 +30,7 @@ from src.query_expansion import (
     EXPANSION_PROMPT_VERSION,
     ExpandedQuery,
     build_expanded_queries,
+    expansion_cache_key,
     load_expansion_cache,
 )
 from src.rank import load_profile_text_lookup, rerank_candidates_with_llm, resolve_llm_candidate_k
@@ -93,12 +94,19 @@ def run_full(
     llm_model: str,
     fallback_policy: str,
     expansion_cache: dict[str, str],
+    expansion_model: str,
 ) -> list[dict[str, Any]]:
     """Run query expansion, multi-query retrieval, and local LLM reranking."""
 
     # Expansion is cached so a re-run reproduces its candidate pool. vLLM's greedy
     # decoding is not bitwise stable across runs, and one flipped token rewrites an
     # expanded query, changing retrieval and therefore the whole comparison.
+    #
+    # The cache is keyed on ``expansion_model``, which is deliberately separate from
+    # ``llm_model``. Expansion is a *retrieval* choice and reranking is a *ranking*
+    # choice; keying both on one name means swapping the reranker silently misses the
+    # cache, re-expands with the new model, and hands each arm a different candidate
+    # pool — so the comparison would attribute a retrieval difference to the reranker.
     expanded_queries = build_expanded_queries(
         raw_query=query.query,
         structured_preference=parse_preference_query(query.query),
@@ -107,7 +115,7 @@ def run_full(
         use_domain_hints=True,
         max_expanded_queries=5,
         expansion_cache=expansion_cache,
-        llm_model=llm_model,
+        llm_model=expansion_model,
     )
     candidates = multi_query_semantic_search(
         expanded_queries=expanded_queries,
@@ -190,6 +198,12 @@ def main(
     top_k_per_query: int = typer.Option(100, help="FAISS results per expanded query in full mode."),
     embedding_model: str = typer.Option(DEFAULT_EMBEDDING_MODEL, help="SentenceTransformer embedding model."),
     llm_model: str = typer.Option(DEFAULT_LLM_MODEL, help="Local Qwen LLM model."),
+    expansion_model: str | None = typer.Option(
+        None,
+        help="Model name the query-expansion cache is keyed on. Defaults to --llm-model. "
+        "Pin it to the original run's model when comparing rerankers, so every arm "
+        "retrieves the identical candidate pool.",
+    ),
     index: Path = typer.Option(DEFAULT_INDEX_PATH, help="FAISS index path."),
     id_map: Path = typer.Option(DEFAULT_ID_MAP_PATH, help="Novel id map path."),
     profiles: Path = typer.Option(DEFAULT_PROFILES_PATH, help="Novel profiles parquet path."),
@@ -215,6 +229,21 @@ def main(
     started = time.perf_counter()
     queries = load_eval_queries(eval_file)
     expansion_cache = load_expansion_cache()
+    resolved_expansion_model = expansion_model or llm_model
+    if resolved_expansion_model != llm_model:
+        # Every query must already be cached under the pinned name. A miss here would
+        # expand with *this* arm's model while recording it under another's key, which
+        # is the exact confound the flag exists to prevent — so stop instead.
+        missing = [
+            query.query
+            for query in queries
+            if expansion_cache_key(query.query, resolved_expansion_model, 4) not in expansion_cache
+        ]
+        if missing:
+            raise typer.BadParameter(
+                f"--expansion-model {resolved_expansion_model} is pinned but {len(missing)} of "
+                f"{len(queries)} queries are not in the expansion cache. Run the pinned model first."
+            )
     resolved_device = resolve_device(device)
     embedder = load_embedding_model(embedding_model, device=resolved_device)
     faiss_index = load_faiss_index(index)
@@ -245,6 +274,7 @@ def main(
                 top_k_per_query=top_k_per_query,
                 llm_candidate_k=llm_candidate_k,
                 llm_model=llm_model,
+                expansion_model=resolved_expansion_model,
                 fallback_policy=fallback_policy,
                 expansion_cache=expansion_cache,
             )
@@ -262,6 +292,7 @@ def main(
         "fallback_policy": fallback_policy,
         "embedding_model": embedding_model,
         "llm_model": llm_model,
+        "expansion_model": resolved_expansion_model,
         "backend": backend,
         "mode": mode,
         "queries": len(queries),

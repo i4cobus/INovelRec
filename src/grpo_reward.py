@@ -1,0 +1,215 @@
+"""Verifiable reward for GRPO over the pointwise reranker.
+
+One episode is one ``(query, candidate)`` pair — the same unit the model sees at
+inference. A listwise episode would give K generations a single scalar and destroy
+credit assignment; the listwise objective stays in evaluation, which also keeps the
+reward rule and the evaluation source separate (see ``docs/post_training_plan.md``).
+
+The reward is
+
+    r = r_format x (w_constraint * r_constraint + w_score * r_score) + w_terminate * r_terminate
+
+``r_format`` gates rather than adds: the other terms read fields, so their values are
+meaningless when the fields are absent. ``r_terminate`` sits *outside* the gate on
+purpose — measured at temperature 1.0, 94.8% of rollouts emit a valid verdict object
+but only 91% stop cleanly, so a model that answered correctly and then rambled must
+lose the rambling points, not the answer points.
+
+Nothing here loads a model or reads a novel: constraint truth arrives as a
+precomputed verdict from ``preferences.constraint_violation_from_densities``, so the
+whole thing is a pure function and tests run on CPU.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any
+
+from src.llm_matcher import extract_json_object
+
+REQUIRED_FIELDS = ("llm_match_score", "confidence", "matched_preferences", "violated_preferences", "risk_flags", "reason")
+VALID_CONFIDENCE = ("high", "medium", "low")
+
+DEFAULT_WEIGHT_CONSTRAINT = 0.5
+DEFAULT_WEIGHT_SCORE = 0.4
+DEFAULT_WEIGHT_TERMINATE = 0.1
+# The teacher-agreement term is an ablation arm, off for the first run: the teacher's
+# rerank was not shown to beat baseline on relevance, so optimising toward it would
+# be fitting noise. Turned on later only to answer "does removing it collapse?".
+DEFAULT_WEIGHT_CONSISTENCY = 0.0
+
+
+@dataclass(frozen=True)
+class RewardWeights:
+    """Weights for the reward terms."""
+
+    constraint: float = DEFAULT_WEIGHT_CONSTRAINT
+    score: float = DEFAULT_WEIGHT_SCORE
+    terminate: float = DEFAULT_WEIGHT_TERMINATE
+    consistency: float = DEFAULT_WEIGHT_CONSISTENCY
+
+
+@dataclass(frozen=True)
+class RewardBreakdown:
+    """Per-term reward, kept so training logs can show *why* a reward moved.
+
+    A single scalar cannot distinguish "learned the constraint" from "learned to
+    emit shorter JSON", and those need separate curves to detect reward hacking.
+    """
+
+    total: float
+    format_ok: bool
+    constraint: float | None
+    score: float | None
+    terminate: float
+    claimed_violation: bool
+    verdict: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reward": self.total,
+            "format_ok": self.format_ok,
+            "r_constraint": self.constraint,
+            "r_score": self.score,
+            "r_terminate": self.terminate,
+            "claimed_violation": self.claimed_violation,
+        }
+
+
+def parse_verdict(text: str) -> dict[str, Any] | None:
+    """Return the first balanced JSON object if it is a well-formed verdict.
+
+    Depth-matched, never a greedy ``{.*}``. Rollouts that fail to stop emit a valid
+    verdict *followed by* garbage — sometimes a second copy of the verdict — so a
+    greedy match spans both and fails on text that actually contains a correct
+    answer. Measured on 1,024 rollouts, greedy scored 83.6% valid where depth-matched
+    scored 94.8%; the difference is entirely answers that were already right.
+    """
+
+    try:
+        payload = extract_json_object(text)
+    except (ValueError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict) or not all(field_name in payload for field_name in REQUIRED_FIELDS):
+        return None
+    try:
+        score = float(payload["llm_match_score"])
+    except (TypeError, ValueError):
+        return None
+    if not 0.0 <= score <= 1.0:
+        return None
+    if str(payload.get("confidence", "")).strip().lower() not in VALID_CONFIDENCE:
+        return None
+    for list_field in ("matched_preferences", "violated_preferences", "risk_flags"):
+        if not isinstance(payload[list_field], list):
+            return None
+    return payload
+
+
+def claims_violation(verdict: dict[str, Any], terms: list[str] | tuple[str, ...]) -> bool:
+    """Whether the model named any of this query's exclusions as violated.
+
+    Substring rather than equality, matching ``normalize_violated_terms``: models
+    write 「不系统」 or bury the term in a phrase, and a claim is a claim.
+    """
+
+    claimed = [str(item) for item in verdict.get("violated_preferences", [])]
+    return any(term and any(term in item for item in claimed) for term in terms)
+
+
+def constraint_reward(verdict: dict[str, Any], terms: list[str], rule_verdict: bool) -> float:
+    """1 when the model's claim matches the rule's reading of the full novel."""
+
+    return float(claims_violation(verdict, terms) == rule_verdict)
+
+
+def score_reward(verdict: dict[str, Any], rule_verdict: bool) -> float | None:
+    """Push ``llm_match_score`` down on rule-confirmed violations. Asymmetric on purpose.
+
+    Claiming a violation only moves ``rank.compute_risk_penalty`` by a flat 0.15,
+    while ``llm_match_score`` carries weight 0.50 in the final score — so rewarding
+    the claim alone leaves two thirds of the lever unused.
+
+    There is deliberately no reward for scoring a *clean* candidate highly: relevance
+    has no verifiable ground truth here, and paying for high scores would invent
+    supervision and invite the score to drift upward for free.
+    """
+
+    if not rule_verdict:
+        return None
+    return 1.0 - float(verdict["llm_match_score"])
+
+
+def compute_reward(
+    text: str,
+    *,
+    terms: list[str],
+    rule_verdict: bool | None,
+    finish_reason: str = "stop",
+    weights: RewardWeights | None = None,
+) -> RewardBreakdown:
+    """Score one rollout.
+
+    ``rule_verdict`` is ``None`` when the density rule abstained or the exclusion is
+    not rule-checkable. Such a pair carries no verifiable signal and should not be in
+    the batch at all — ``20_build_grpo_data.py`` filters them out — but if one arrives
+    the constraint terms are simply skipped rather than guessed at. Scoring an
+    abstention as 0 would teach the model that ambiguity is punished.
+    """
+
+    active = weights or RewardWeights()
+    verdict = parse_verdict(text)
+    terminate = float(finish_reason == "stop")
+
+    if verdict is None:
+        return RewardBreakdown(
+            total=active.terminate * terminate,
+            format_ok=False,
+            constraint=None,
+            score=None,
+            terminate=terminate,
+            claimed_violation=False,
+        )
+
+    gated = 0.0
+    r_constraint: float | None = None
+    r_score: float | None = None
+    if rule_verdict is not None and terms:
+        r_constraint = constraint_reward(verdict, terms, rule_verdict)
+        gated += active.constraint * r_constraint
+        r_score = score_reward(verdict, rule_verdict)
+        if r_score is not None:
+            gated += active.score * r_score
+
+    return RewardBreakdown(
+        total=gated + active.terminate * terminate,
+        format_ok=True,
+        constraint=r_constraint,
+        score=r_score,
+        terminate=terminate,
+        claimed_violation=claims_violation(verdict, terms),
+        verdict=verdict,
+    )
+
+
+def group_advantages(rewards: list[float]) -> list[float]:
+    """Normalize rewards within a GRPO group, treating a degenerate group as no signal.
+
+    When every sample in a group earns the same reward the standard deviation is
+    zero and the advantage is undefined. Dividing by ``std + eps`` there would turn
+    floating-point dust into enormous advantages pointing in arbitrary directions, so
+    the group contributes nothing instead.
+
+    The share of groups that land here is worth logging on its own: it rises as the
+    policy converges, and a sudden jump means the reward has stopped discriminating.
+    """
+
+    if not rewards:
+        return []
+    mean = sum(rewards) / len(rewards)
+    variance = sum((value - mean) ** 2 for value in rewards) / len(rewards)
+    if variance <= 1e-12:
+        return [0.0] * len(rewards)
+    deviation = variance**0.5
+    return [(value - mean) / deviation for value in rewards]

@@ -135,3 +135,23 @@ def test_a_group_with_identical_rewards_contributes_no_gradient() -> None:
     advantages = group_advantages([1.0, 0.0, 1.0, 0.0])
     assert abs(sum(advantages)) < 1e-9
     assert advantages[0] > 0 > advantages[1]
+
+
+def test_termination_is_read_off_the_text_when_no_finish_reason_is_given() -> None:
+    """verl's reward interface passes only the decoded string.
+
+    ``compute_score`` receives ``(data_source, solution_str, ground_truth, extra_info)``
+    — no ``finish_reason`` — so termination has to come from the text. Trailing
+    non-whitespace after the first complete object is the defect, whether or not the
+    rollout also hit the token cap.
+    """
+
+    clean = render(violated_preferences=["系统"])
+    rambled = clean + "wingConstants.UTF-8]];];].\n[PyCharm]"
+
+    assert compute_reward(clean, terms=["系统"], rule_verdict=True).terminate == 1.0
+    assert compute_reward(rambled, terms=["系统"], rule_verdict=True).terminate == 0.0
+    # A trailing newline is not rambling.
+    assert compute_reward(clean + "\n  ", terms=["系统"], rule_verdict=True).terminate == 1.0
+    # An explicit finish_reason still wins when a caller has one.
+    assert compute_reward(rambled, terms=["系统"], rule_verdict=True, finish_reason="stop").terminate == 1.0

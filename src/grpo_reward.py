@@ -26,7 +26,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.llm_matcher import extract_json_object
+from src.llm_matcher import split_first_json_object
 
 REQUIRED_FIELDS = ("llm_match_score", "confidence", "matched_preferences", "violated_preferences", "risk_flags", "reason")
 VALID_CONFIDENCE = ("high", "medium", "low")
@@ -77,6 +77,23 @@ class RewardBreakdown:
         }
 
 
+def trailing_text(text: str) -> str | None:
+    """Whatever the model emitted after its first complete verdict object.
+
+    ``None`` when there is no complete object at all. This is how termination is
+    scored: verl's reward interface passes only the decoded string, not
+    ``finish_reason``, and the string is the better signal anyway. Hitting the token
+    cap and rambling under it are the same defect, and 9% of rollouts at temperature
+    1.0 emit a correct verdict followed by garbage — sometimes a second copy of the
+    verdict, sometimes unrelated text.
+    """
+
+    try:
+        return split_first_json_object(text)[1]
+    except (ValueError, TypeError):
+        return None
+
+
 def parse_verdict(text: str) -> dict[str, Any] | None:
     """Return the first balanced JSON object if it is a well-formed verdict.
 
@@ -88,7 +105,7 @@ def parse_verdict(text: str) -> dict[str, Any] | None:
     """
 
     try:
-        payload = extract_json_object(text)
+        payload = json.loads(split_first_json_object(text)[0])
     except (ValueError, json.JSONDecodeError, TypeError):
         return None
     if not isinstance(payload, dict) or not all(field_name in payload for field_name in REQUIRED_FIELDS):
@@ -146,7 +163,7 @@ def compute_reward(
     *,
     terms: list[str],
     rule_verdict: bool | None,
-    finish_reason: str = "stop",
+    finish_reason: str | None = None,
     weights: RewardWeights | None = None,
 ) -> RewardBreakdown:
     """Score one rollout.
@@ -160,7 +177,11 @@ def compute_reward(
 
     active = weights or RewardWeights()
     verdict = parse_verdict(text)
-    terminate = float(finish_reason == "stop")
+    # Default to reading termination off the text, because that is all verl's reward
+    # interface receives. ``finish_reason`` overrides it when a caller has one.
+    remainder = trailing_text(text)
+    clean_stop = remainder is not None and not remainder.strip()
+    terminate = float(finish_reason == "stop") if finish_reason is not None else float(clean_stop)
 
     if verdict is None:
         return RewardBreakdown(

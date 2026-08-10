@@ -162,20 +162,29 @@ def build_judge_prompt(task: JudgeTask) -> str:
     )
 
 
-def parse_judge_verdict(text: str) -> JudgeVerdict:
-    """Parse a judge response, falling back to a neutral abstention."""
+def parse_judge_verdict(text: str) -> JudgeVerdict | None:
+    """Parse a judge response, or return ``None`` when it cannot be parsed.
+
+    ``None``, not label 0. An unparseable response means *the judge did not answer*,
+    which is the same situation as a dead request and must be excluded from the
+    results — recording it as "not relevant, no violation" invents a verdict and
+    biases both metrics downward at once. ``run_judgements`` therefore neither
+    records nor caches it.
+
+    Parsing reuses ``extract_json_object`` rather than a greedy ``{.*}``. That regex
+    spans from the first brace anywhere in the output to the last, so a single brace
+    inside a reasoning model's ``<think>`` block swallows the real answer. Measured
+    on a trace containing ``{系统}`` followed by a valid verdict of
+    ``label 2 / violation true``, the old parser returned ``label 0 / violation
+    false`` — inverted on both fields — and cached it.
+    """
+
+    from src.llm_matcher import extract_json_object
 
     try:
-        return JudgeVerdict.from_dict(json.loads(text))
-    except (json.JSONDecodeError, TypeError, AttributeError):
-        pass
-    match = re.search(r"\{.*\}", text, flags=re.S)
-    if not match:
-        return JudgeVerdict(relevance_label=0, constraint_violation=False, reason="judge_parse_failed")
-    try:
-        return JudgeVerdict.from_dict(json.loads(match.group(0)))
-    except (json.JSONDecodeError, TypeError):
-        return JudgeVerdict(relevance_label=0, constraint_violation=False, reason="judge_parse_failed")
+        return JudgeVerdict.from_dict(extract_json_object(text))
+    except (ValueError, json.JSONDecodeError, TypeError, AttributeError):
+        return None
 
 
 def judge_cache_key(task: JudgeTask, judge_model: str) -> str:
@@ -285,6 +294,7 @@ class JudgeRunSummary:
     cache_hits: int = 0
     judged: int = 0
     failed: int = 0
+    unparsed: int = 0
     skipped_over_budget: int = 0
     spent_usd: float = 0.0
     usage: TokenUsage = field(default_factory=TokenUsage)
@@ -357,6 +367,17 @@ def run_judgements(
 
         budget.record(usage)
         verdict = parse_judge_verdict(response)
+        if verdict is None:
+            # The tokens are spent either way, so the usage above still counts. But an
+            # unparseable answer is not a verdict: it is neither recorded nor cached,
+            # exactly as a failed request is not. Caching it would freeze a
+            # non-answer into the results for every future run.
+            with write_lock:
+                summary.unparsed += 1
+                summary.usage = summary.usage + usage
+            if on_result:
+                on_result(task, None)
+            return
         with write_lock:
             verdicts[key] = verdict
             summary.judged += 1

@@ -98,10 +98,36 @@ def test_parse_judge_verdict_wrapped_json() -> None:
     assert verdict.relevance_label == 1
 
 
-def test_parse_judge_verdict_abstains_on_garbage() -> None:
-    verdict = parse_judge_verdict("完全不是 JSON")
-    assert verdict.relevance_label == 0
-    assert verdict.reason == "judge_parse_failed"
+def test_an_unparseable_response_is_no_verdict_rather_than_a_zero() -> None:
+    """"The judge did not answer" and "the judge said not relevant" are different.
+
+    This used to return ``relevance_label=0, constraint_violation=False`` — a
+    fabricated verdict that biases both metrics downward at once, and it was written
+    to the cache, freezing the non-answer into every later run. 313 of 2,615 cached
+    verdicts carried that marker.
+    """
+
+    assert parse_judge_verdict("完全不是 JSON") is None
+
+
+def test_a_reasoning_trace_does_not_swallow_the_verdict() -> None:
+    """A greedy ``{.*}`` spans from a brace inside <think> to the answer's closing brace.
+
+    Measured on this exact input the old parser returned label 0 / violation False —
+    inverted on *both* fields relative to what the judge actually said. The reranker
+    path already had this fixed; the judge path reuses that function now.
+    """
+
+    response = (
+        "<think>\nThe user excludes {系统}. The excerpt shows a status panel.\n</think>\n"
+        '{"relevance_label":2,"constraint_violation":true,'
+        '"judge_confidence":"high","reason":"出现系统面板"}'
+    )
+    verdict = parse_judge_verdict(response)
+
+    assert verdict is not None
+    assert verdict.relevance_label == 2
+    assert verdict.constraint_violation is True
 
 
 def test_labels_are_clamped() -> None:

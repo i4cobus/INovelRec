@@ -83,6 +83,11 @@ class HTTPChatTransport:
     # through an outbound proxy, but a hosted gateway usually has to be.
     bypass_proxy: bool | None = None
     extra_body: dict[str, Any] = field(default_factory=dict)
+    # Sized to the caller's concurrency, not to a module constant. The pool used to
+    # be a fixed 32 connections however many workers the caller asked for, so a run
+    # driving 80 threads still got 32 in flight and the rest queued: SFT assembly
+    # measured 4.6 calls/s against a server benchmarked at 16.
+    max_connections: int = DEFAULT_MAX_WORKERS * 2
     _client: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -105,7 +110,10 @@ class HTTPChatTransport:
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             # Pool generously: score_many drives many concurrent requests.
-            limits = httpx.Limits(max_connections=DEFAULT_MAX_WORKERS * 2, max_keepalive_connections=DEFAULT_MAX_WORKERS)
+            limits = httpx.Limits(
+                max_connections=self.max_connections,
+                max_keepalive_connections=max(self.max_connections // 2, 1),
+            )
             # trust_env=False also drops proxy settings, which is exactly what a
             # local vLLM needs: this host exports http_proxy, and the proxy answers
             # a request for 127.0.0.1 by closing the connection. A hosted gateway
@@ -325,5 +333,8 @@ def create_openai_compatible_matcher(
         api_key=api_key,
         timeout=timeout,
         extra_body=extra_body or {},
+        # Headroom over max_workers: callers that score several queries at once drive
+        # more concurrent requests than any single score_many opens.
+        max_connections=max(max_workers * 2, DEFAULT_MAX_WORKERS * 2),
     )
     return OpenAICompatibleMatcher(transport, max_new_tokens=max_new_tokens, max_workers=max_workers)

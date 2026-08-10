@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import regex
@@ -91,12 +92,41 @@ def constraint_violation_by_rule(text: str, terms: list[str] | tuple[str, ...]) 
     checkable = [term for term in terms if is_rule_checkable(term)]
     if not checkable:
         return None
-    density = max(term_density(text, term) for term in checkable)
+    return violation_from_density(max(term_density(text, term) for term in checkable))
+
+
+def violation_from_density(density: float) -> bool | None:
+    """Apply the two thresholds to an already-measured density.
+
+    Split out so the precomputed density table and the live text path share one
+    definition of where the thresholds sit. Everything above this line is how the
+    density was obtained; everything below it is the rule.
+    """
+
     if density >= VIOLATION_DENSITY:
         return True
     if density <= CLEAN_DENSITY:
         return False
     return None
+
+
+def constraint_violation_from_densities(
+    densities: Mapping[str, float],
+    terms: list[str] | tuple[str, ...],
+) -> bool | None:
+    """Same verdict as :func:`constraint_violation_by_rule`, from a density table.
+
+    GRPO computes this reward inside the rollout loop, where re-reading a 3M-character
+    novel per candidate is not affordable. Densities for every (novel, term) pair are
+    precomputed once by ``16_build_density_table.py``; this turns the reward into a
+    dictionary lookup. A term missing from the table means the corpus pass never saw
+    it, which is a zero count, not an abstention.
+    """
+
+    checkable = [term for term in terms if is_rule_checkable(term)]
+    if not checkable:
+        return None
+    return violation_from_density(max(float(densities.get(term, 0.0)) for term in checkable))
 
 
 @dataclass(frozen=True)

@@ -358,3 +358,53 @@ def test_an_unstratified_prompt_still_offers_the_whole_menu() -> None:
     prompt = build_synthesis_prompt(task(), exclusion_kind="meta")
 
     assert "负向词必须从这个表里选" in prompt
+
+
+def test_the_density_table_path_gives_the_same_verdict_as_reading_the_text() -> None:
+    """One rule, two ways of feeding it — they must never diverge.
+
+    GRPO cannot re-read a 3M-character novel per candidate per rollout, so densities
+    are precomputed into a table and the reward becomes a lookup. That is only safe
+    while the table path and the text path apply the *same* thresholds; a second copy
+    of 3.0 would fork the rule into two artifacts, and §一's divergence plot compares
+    against exactly one of them.
+    """
+
+    from src.preferences import IN_TEXT_NEGATIVES, constraint_violation_from_densities, term_density
+
+    texts = {
+        "violating": "他打开了系统面板。" * 200,
+        "clean": "正" * 200_000 + "他系统地学习了剑法",
+        "abstaining": ("正" * 50_000 + "系统") * 2,
+    }
+    for name, text in texts.items():
+        densities = {term: term_density(text, term) for term in IN_TEXT_NEGATIVES}
+        assert constraint_violation_from_densities(densities, ["系统"]) == constraint_violation_by_rule(text, ["系统"]), name
+
+    # A term absent from the table is a zero count, not an abstention: the corpus
+    # pass measured every rule-checkable term, so a miss means it never occurred.
+    assert constraint_violation_from_densities({}, ["系统"]) is False
+    # And a meta label still yields no signal from either path.
+    assert constraint_violation_from_densities({"爽文": 99.0}, ["爽文"]) is None
+
+
+def test_the_teachers_violation_labels_are_mapped_onto_the_querys_own_exclusions() -> None:
+    """The field has to mean one thing regardless of who filled it.
+
+    Real output for 「青春 校园 治愈 温情 不言情」: the teacher returned a negation
+    marker glued to the term, the term buried inside a phrase, and three entries that
+    are what the reader *wants* — reading `violated_preferences` as "preferences that
+    went unmet". Where the rule fills the same field it holds bare exclusion terms.
+    Two conventions in one column teaches the model that the column means nothing.
+    """
+
+    from src.query_synthesis import normalize_violated_terms
+
+    claimed = ["不言情", "青春", "校园", "治愈", "男主 不圣母"]
+    assert normalize_violated_terms(claimed, ["言情", "圣母"]) == ["言情", "圣母"]
+
+    # Wanted terms are dropped rather than silently re-read as violations.
+    assert normalize_violated_terms(["青春", "治愈"], ["言情"]) == []
+    # Order follows the query, not the teacher's arbitrary ordering.
+    assert normalize_violated_terms(["圣母", "言情"], ["言情", "圣母"]) == ["言情", "圣母"]
+    assert normalize_violated_terms([], ["言情"]) == []

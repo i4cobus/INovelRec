@@ -361,6 +361,27 @@ def mentions_any(text: str, terms: list[str] | tuple[str, ...]) -> bool:
     return any(term and term in text for term in terms)
 
 
+def normalize_violated_terms(claimed: list[str] | tuple[str, ...], unwanted: list[str] | tuple[str, ...]) -> list[str]:
+    """Map a teacher's free-text violation labels onto the query's own exclusions.
+
+    Left alone, this field means two different things depending on who filled it.
+    Where the rule decides it holds bare exclusion terms; where the teacher decides
+    it holds whatever prose it felt like. One real sample answering
+    「青春 校园 治愈 … 不言情」 returned
+    ``["不言情", "青春", "校园", "治愈", "男主 不圣母"]`` — a negation marker glued to
+    the term, a term buried in a phrase, and three entries that are what the reader
+    *wants*, read as "preferences that went unmet". Training on both conventions
+    teaches the field to mean nothing.
+
+    So the query's own ``unwanted`` list is the vocabulary: an exclusion counts as
+    violated when the teacher's text mentions it anywhere, and anything outside that
+    list is dropped. Order follows ``unwanted`` so the output is deterministic rather
+    than a function of how the teacher happened to sort its answer.
+    """
+
+    return [term for term in unwanted if term and any(term in str(item) for item in claimed)]
+
+
 def align_fields_with_rule(
     result: Any,
     terms: list[str],

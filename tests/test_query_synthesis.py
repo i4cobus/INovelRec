@@ -323,3 +323,38 @@ def test_a_reason_that_never_mentioned_the_exclusion_survives_a_clean_verdict() 
 
     assert aligned["reason"] == "世界观扎实、节奏明快"
     assert aligned["risk_flags"] == ["篇幅较短"]
+
+
+def test_stratification_cycles_the_whole_vocabulary_not_the_evaluation_terms() -> None:
+    """Unstratified generation covered 3 terms well and 6 not at all.
+
+    The cycle walks the entire vocabulary rather than the terms evaluation happens
+    to use — targeting those would fit the training distribution to the test set.
+    """
+
+    from src.query_synthesis import stratified_terms
+
+    assigned = stratified_terms("meta", len(META_LABEL_NEGATIVES) * 3)
+
+    assert set(assigned) == set(META_LABEL_NEGATIVES)
+    counts = {term: assigned.count(term) for term in META_LABEL_NEGATIVES}
+    assert set(counts.values()) == {3}, "every term gets the same quota"
+
+
+def test_a_stratified_prompt_pins_one_term_and_forbids_substitution() -> None:
+    from src.query_synthesis import build_synthesis_prompt
+
+    prompt = build_synthesis_prompt(task(), exclusion_kind="meta", required_term="速通")
+
+    assert "必须**是「速通」" in prompt or "必须**是「速通」" in prompt.replace("*", "*")
+    assert "速通" in prompt
+    # It must not also hand over the full menu, which is what it would pick from.
+    assert "负向词必须从这个表里选" not in prompt
+
+
+def test_an_unstratified_prompt_still_offers_the_whole_menu() -> None:
+    from src.query_synthesis import build_synthesis_prompt
+
+    prompt = build_synthesis_prompt(task(), exclusion_kind="meta")
+
+    assert "负向词必须从这个表里选" in prompt

@@ -138,6 +138,34 @@ def is_self_contradictory(query: str, wanted: list[str], unwanted: list[str]) ->
 ExclusionKind = Literal["in_text", "meta"]
 
 
+def stratified_terms(kind: ExclusionKind, count: int) -> list[str]:
+    """Assign each seed an exclusion term, cycling the whole vocabulary in order.
+
+    Left to itself the teacher picks whatever suits the book, and book-suitability
+    is wildly uneven: an unstratified run over 3,000 seeds put 75% of its queries on
+    小白 / 后宫 / 恋爱脑 and produced literally zero for 宠文, 搞笑, 速通, 独狼,
+    开局无敌 and 魔改.
+
+    The cycle covers the *entire* vocabulary rather than the terms evaluation
+    happens to use. Targeting those would be fitting the training distribution to
+    the test set; covering everything reaches them as a side effect, which is the
+    same discipline the evaluation extension used.
+    """
+
+    vocabulary = sorted(IN_TEXT_NEGATIVES if kind == "in_text" else META_LABEL_NEGATIVES)
+    return [vocabulary[index % len(vocabulary)] for index in range(count)]
+
+
+def required_clause(term: str) -> str:
+    """The clause pinning every query from one seed to a single exclusion term."""
+
+    return (
+        f"   负向排除项**必须**是「{term}」，每条 query 都用它，不要换成别的词。\n"
+        f"   如果这本书与「{term}」毫无关系，就写一条排除它的正例 query 即可——"
+        "不要为了凑违反而编造画像里没有的内容。"
+    )
+
+
 def exclusion_instruction(kind: ExclusionKind) -> str:
     """The clause steering which vocabulary the exclusion is drawn from.
 
@@ -164,6 +192,7 @@ def build_synthesis_prompt(
     shapes: tuple[str, ...] = SHAPES,
     count: int = DEFAULT_QUERIES_PER_BOOK,
     exclusion_kind: ExclusionKind = "in_text",
+    required_term: str | None = None,
 ) -> str:
     """Ask the teacher what a reader would search for to reach this novel.
 
@@ -184,7 +213,7 @@ def build_synthesis_prompt(
         "2. 每条 query 都要带一个负向排除项（「不XX」），并标明这本书是否**违反**它：\n"
         "   - satisfies: 这本书**不含**该排除项 —— 它是这条 query 的正例\n"
         "   - violates:  这本书**明确含有**该排除项 —— 它是这条 query 的负例\n"
-        f"{exclusion_instruction(exclusion_kind)}\n"
+        f"{exclusion_instruction(exclusion_kind) if required_term is None else required_clause(required_term)}\n"
         "3. query 只描述读者需求，**不要出现任何书名**——写出书名会让检索退化成字符串匹配。\n"
         "4. 只依据画像判断，不要臆测画像里没有的内容。\n\n"
         "只输出 JSON，不要 markdown：\n"

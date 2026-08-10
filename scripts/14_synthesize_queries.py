@@ -32,6 +32,7 @@ from src.query_synthesis import (
     deduplicate,
     label_constraint_by_rule,
     looks_truncated,
+    stratified_terms,
     parse_synthesis_response,
     verify_constraint_claim,
 )
@@ -77,6 +78,12 @@ def main(
         "silently yielded nothing; 1200 drops that to 8% and roughly doubles the query count.",
     ),
     seed: int = typer.Option(20260809, help="Sampling seed."),
+    stratify: bool = typer.Option(
+        False,
+        help="Cycle the whole exclusion vocabulary across seeds. Without it the teacher "
+        "picks whatever suits each book, which put 75%% of an unstratified run on three "
+        "terms and produced zero for six others.",
+    ),
     exclusion_kind: str = typer.Option(
         "in_text",
         help="Which exclusion vocabulary the teacher draws from: in_text (rule-checkable, "
@@ -106,7 +113,11 @@ def main(
     console.print(f"Reserved evaluation queries: {len(reserved)}")
 
     matcher = create_matcher(backend="http", model_name=model, base_url=base_url, max_workers=max_workers, max_new_tokens=max_new_tokens)
-    prompts = [(SynthesisTask(**{**task.__dict__}), build_synthesis_prompt(task, count=per_book, exclusion_kind=exclusion_kind)) for task in tasks]
+    assigned = stratified_terms(exclusion_kind, len(tasks)) if stratify else [None] * len(tasks)
+    prompts = [
+        (SynthesisTask(**{**task.__dict__}), build_synthesis_prompt(task, count=per_book, exclusion_kind=exclusion_kind, required_term=term))
+        for task, term in zip(tasks, assigned, strict=True)
+    ]
 
     generated = []
     failed = truncated = barren = 0

@@ -205,8 +205,21 @@ def judge_cache_key(task: JudgeTask, judge_model: str) -> str:
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+PARSE_FAILED_MARKER = "judge_parse_failed"
+
+
 def load_judge_cache(cache_path: Path = JUDGE_CACHE_PATH) -> dict[str, JudgeVerdict]:
-    """Load cached verdicts keyed by cache key."""
+    """Load cached verdicts, skipping entries that were never really verdicts.
+
+    Before ``parse_judge_verdict`` returned ``None``, an unparseable response was
+    written to the cache as ``relevance_label=0, constraint_violation=False`` with
+    the reason ``judge_parse_failed``. Those entries are non-answers, and reusing one
+    in a new measurement knowingly imports a fabricated label.
+
+    They are skipped on load rather than deleted from the file: deleting would
+    silently rewrite results already recorded under them, which is a separate
+    decision. Skipping just means the pair gets judged again.
+    """
 
     if not cache_path.exists():
         return {}
@@ -217,6 +230,8 @@ def load_judge_cache(cache_path: Path = JUDGE_CACHE_PATH) -> dict[str, JudgeVerd
         try:
             item = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if PARSE_FAILED_MARKER in str(item.get("verdict", {}).get("reason", "")):
             continue
         key = str(item.get("cache_key", ""))
         if key:

@@ -1,33 +1,119 @@
-# AI-Powered Chinese Web Novel Discovery System
+# Preference Alignment for a Chinese Web Novel Reranker (SFT + GRPO)
 
-## Overview
+Post-training a 4B reranker to obey **negative preferences** — "仙侠 慢热 **不要系统**" — over a
+private corpus of 7,653 Chinese web novels (~36 GB of plain text).
 
-This project is a local AI application that turns a private corpus of 7,666 Chinese web novels in TXT format, around 36 GB total, into a searchable and explainable recommendation system. It is designed for personal web novel discovery over messy, unstructured local text data.
+A retrieval system supplies the task and the evaluation harness. The work is the post-training:
+distilling a domain reranker from a 32B teacher, then optimising constraint compliance with GRPO
+against a rule-verifiable reward, and measuring what that reward does and does not buy.
 
-The system supports natural-language Chinese preference queries such as:
+## Result
 
-```text
-凡人流 仙侠 慢热 理性主角 不系统
+Every arm below ranks the *same* retrieved candidates — same index, same cached query expansions,
+same `candidate_k` — so the only variable is the scoring model. `baseline_faiss` is identical
+across all five arms, which is the check that says so.
+
+| arm | P@10 | strong P@10 | mean relevance | **violation rate** | rule-checkable arm |
+|---|---|---|---|---|---|
+| teacher 32B | **0.956** | **0.679** | **1.635** | 0.251 | 0.314 |
+| off-the-shelf 4B-Instruct | 0.932 | 0.616 | 1.548 | 0.271 | 0.294 |
+| 4B after SFT | 0.952 | 0.621 | 1.573 | 0.276 | 0.359 |
+| **4B after GRPO** | 0.954 | 0.642 | 1.596 | **0.241** | **0.271** |
+
+Labels come from an LLM judge calibrated against 200 human annotations. The 4B model ends up
+**better at obeying negative constraints than the 32B teacher it was distilled from**, at roughly
+an eighth of the inference cost, with relevance unchanged from SFT.
+
+Honest bound: on the 17 rule-checkable queries a paired sign test gives p=0.092 against the SFT
+model. The direction is consistent across all four aggregate metrics and retrieval is provably
+identical, but "confirmed" is the wrong word for n=17.
+
+## What the project is actually about
+
+Real products never have a single verifiable reward. Here the reward mixes a **hard, checkable**
+signal (does this novel contain the excluded trope?) with a **soft, model-judged** one (is it
+relevant?). The question worth answering is where a policy goes when both are in the same
+objective.
+
+It goes straight for the checkable half — and that half only covers part of what you wanted:
+
+| GRPO round | reward-rule agreement | judge-measured violation rate |
+|---|---|---|
+| v1 | 0.547 → 0.705 | 0.359 → 0.353 (**no movement**) |
+| **v2** | 0.553 → 0.704 | 0.359 → **0.271** |
+| v3 | 0.559 → **0.768** | 0.359 → 0.282 |
+| v4 | 0.533 → 0.717 | 0.359 → 0.276 |
+
+Across four rounds the training metric rose 0.15–0.21 every time while the metric that matters
+moved at most 0.09. The gap is measurable rather than mysterious: the density rule *sees* only 48%
+of real violations (63% after widening its vocabulary), which caps a perfect rule-follower at a
+0.141 violation rate. Reaching 0.271 captured roughly 40% of the space that was actually available.
+
+Seeing this at all required an evaluation whose labels never touch the reward — the discipline that
+makes the two columns above independent.
+
+## Two policy collapses
+
+Both were caught by monitoring curves rather than by a drop in the final metric.
+
+**"Claim every candidate violates."** Predicted before training and observed at step 25 of round 1:
+the claim rate on held-out data went 0.10 → 0.80. The rollout pool is balanced 50/50 between
+violating and clean candidates precisely so this shortcut earns the same as saying nothing, and it
+fell back to 0.45 within 25 steps without intervention.
+
+**"Score everything 0."** Not predicted. The score reward paid for *lowering* the score on
+violations and paid nothing on clean candidates, so answering 0 everywhere was its trivial optimum
+— and since that field carries weight 0.50 in the ranking formula, the reranker's relevance
+contribution vanished (paired sign test against SFT, p=0.012). Replacing it with a margin against a
+contrasting candidate of the same query makes any constant score exactly average instead of
+optimal.
+
+## Pipeline
+
+```
+data/raw/*.txt                      7,653 novels, up to 3M characters each
+  → 01  ingest, dedupe by content hash
+  → 02  profile: 黄金三章 + distributed sampling, capped at 8000 chars
+  → 03  Qwen3-Embedding-8B → FAISS IndexFlatIP
+  → 04  retrieval + rank            ← the task
+  → 16  term-density table          ← the verifiable reward, precomputed to 1.2 MB
+  → 17  SFT data from a 32B teacher, candidates restricted to fold=train
+  → 18  SFT Qwen3-4B-Base           4x A100, 1 epoch in 2.2h
+  → 20  GRPO episode pool, balanced 50/50 and weighted to the head of retrieval
+  → 22  GRPO via verl               reward = src/grpo_reward.py
+  → 07  evaluate  → 09 LLM judge  → 11 human agreement
 ```
 
-Instead of relying on manually provided tags or collaborative-filtering user behavior, the system combines semantic embeddings, FAISS vector retrieval, query expansion, local Qwen3 LLM reranking, and grounded explanation generation. It is an AI application development portfolio project demonstrating data processing, Chinese NLP, vector search, local LLM inference, recommendation ranking, testing, CLI tooling, and Streamlit demo integration.
+## Reward design
 
-## Demo
+A negative constraint is decided by **density, never presence**. A 3M-character novel that says
+消化系统 once is not a 系统流 story; scoring presence marked 87% of the corpus as violating and
+turned the reward into a constant. Two thresholds instead of one, so the ambiguous middle can be
+declined rather than guessed:
 
-Streamlit demo interface:
+```python
+density >= 3.0  → violates
+density <= 1.0  → clean
+otherwise       → None, meaning no reward signal — never "no violation"
+```
 
-![Streamlit recommendation demo](demo/demo1.png)
+Thresholds are calibrated against human labels. Each exclusion is a *set* of surface forms, because
+a novel saturated with 觉醒者 and 能力者 may mention 异能 at density 0.25; members were screened by
+corpus-wide firing rate and co-occurrence with the base term, never by agreement with the judge —
+selecting the reward's vocabulary to match the evaluation would make any later gain self-fulfilling.
 
-Explainable recommendation cards:
+Exclusions readers attach from *outside* the book (宠文, 种马) are held in a separate set and never
+enter the verifiable reward: 《娇女》 is a 宠文 and the word never appears in it, so a keyword rule's
+recall there is zero by construction, not merely low.
 
-![Explainable recommendation results](demo/demo2.png)
+## Retrieval system (the task and the harness)
 
-## Key Features
+### Key Features
 
 - Large-scale TXT corpus ingestion: scans thousands of Chinese novel TXT files and builds structured metadata.
 - Encoding detection and text cleaning: handles Chinese encodings and removes repeated source-site boilerplate such as `知轩藏书` / `zxcs` advertisements.
 - Compact novel profile generation: creates representative profiles from sampled novel text instead of embedding full books directly.
-- Qwen3 semantic embeddings: uses `Qwen/Qwen3-Embedding-4B` to encode novel profiles for semantic retrieval.
+- Qwen3 semantic embeddings: uses `Qwen/Qwen3-Embedding-8B` to encode novel profiles for semantic retrieval.
 - FAISS vector search: retrieves candidate novels from the local corpus using natural-language queries.
 - Query expansion and multi-query retrieval: improves recall for high-level genre and trope queries.
 - Local LLM-assisted reranking: uses a local Qwen3 LLM through Hugging Face Transformers to evaluate candidate-query fit.
@@ -196,7 +282,7 @@ uv run python scripts/03_build_index.py --overwrite --device cuda
 
 | Metric | Value |
 |------|------|
-| Profiles written | 7,655 / 7,666 |
+| Profiles written | 7,655 / 7,653 |
 | Rate | 99.86% |
 | boilerplate detected | 7,575 |
 | boilerplate lines removed | 45,380  |
@@ -205,7 +291,7 @@ uv run python scripts/03_build_index.py --overwrite --device cuda
 
 ### Stage 3: Embeddings and FAISS Index
 
-Stage 3 embeds compact profiles with `Qwen/Qwen3-Embedding-4B` and builds a FAISS `IndexFlatIP` index.
+Stage 3 embeds compact profiles with `Qwen/Qwen3-Embedding-8B` and builds a FAISS `IndexFlatIP` index.
 
 Expected files:
 

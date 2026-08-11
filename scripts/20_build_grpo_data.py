@@ -81,15 +81,33 @@ def sft_query_texts(path: Path, count: int, seed: int) -> set[str]:
     return {str(row["query"]) for row in chosen}
 
 
-def balance(pairs: list[dict], rng: random.Random) -> list[dict]:
-    """Downsample the majority class so violating and clean are equally represented."""
+def balance(pairs: list[dict], rng: random.Random, head_depth: int = 20) -> list[dict]:
+    """Equalise violating/clean, preferring candidates from the head of the pool.
 
-    violating = [item for item in pairs if item["rule_verdict"]]
-    clean = [item for item in pairs if not item["rule_verdict"]]
+    The first run balanced by rule verdict alone and drew 90% of its episodes from
+    below rank 10, median rank 51. Those are candidates the policy already scores
+    near zero, so "answer 0" was a globally safe action there — and it transferred
+    straight to the top ten, where it is wrong and where every metric is measured.
+    A training distribution that does not cover the region under evaluation cannot
+    be expected to improve it.
+
+    Within each class, head candidates are taken first and the rest fill in, so the
+    pool keeps the hard deep-pool cases without being dominated by them.
+    """
+
+    def ordered(items: list[dict]) -> list[dict]:
+        head = [item for item in items if item["pool_rank"] < head_depth]
+        tail = [item for item in items if item["pool_rank"] >= head_depth]
+        rng.shuffle(head)
+        rng.shuffle(tail)
+        return head + tail
+
+    violating = ordered([item for item in pairs if item["rule_verdict"]])
+    clean = ordered([item for item in pairs if not item["rule_verdict"]])
     keep = min(len(violating), len(clean))
     if keep == 0:
         return []
-    return rng.sample(violating, keep) + rng.sample(clean, keep)
+    return violating[:keep] + clean[:keep]
 
 
 @app.command()
@@ -107,6 +125,12 @@ def main(
     candidate_k: int = typer.Option(100, help="Retrieval pool per query, after fold filtering."),
     top_k_per_query: int = typer.Option(100, help="FAISS depth per expanded query."),
     per_query_cap: int = typer.Option(4, help="Episodes kept per query, after balancing."),
+    head_depth: int = typer.Option(
+        20,
+        help="Ranks counted as the head of the retrieval pool. At least half of each "
+        "query's episodes are drawn from it, because that is the region the "
+        "evaluation metric is computed over.",
+    ),
     model: str = typer.Option("Qwen/Qwen3-32B", help="Model name the expansion cache is keyed on."),
     base_url: str = typer.Option(DEFAULT_BASE_URL, help="Endpoint, used only for uncached expansions."),
     embedding_model: str = typer.Option("Qwen/Qwen3-Embedding-8B", help="Encoder for retrieval."),
@@ -229,7 +253,7 @@ def main(
                     "prompt": build_match_prompt(query, candidate, profile_text, max_profile_chars=profile_max_chars),
                 })
 
-            balanced = balance(decidable, rng)
+            balanced = balance(decidable, rng, head_depth=head_depth)
             if not balanced:
                 stats["unbalanceable_query"] += 1
                 continue

@@ -141,21 +141,40 @@ def constraint_reward(verdict: dict[str, Any], terms: list[str], rule_verdict: b
     return float(claims_violation(verdict, terms) == rule_verdict)
 
 
-def score_reward(verdict: dict[str, Any], rule_verdict: bool) -> float | None:
-    """Push ``llm_match_score`` down on rule-confirmed violations. Asymmetric on purpose.
+MARGIN_SCALE = 0.3
 
-    Claiming a violation only moves ``rank.compute_risk_penalty`` by a flat 0.15,
-    while ``llm_match_score`` carries weight 0.50 in the final score — so rewarding
-    the claim alone leaves two thirds of the lever unused.
 
-    There is deliberately no reward for scoring a *clean* candidate highly: relevance
-    has no verifiable ground truth here, and paying for high scores would invent
-    supervision and invite the score to drift upward for free.
+def pairwise_score_reward(
+    verdict: dict[str, Any],
+    rule_verdict: bool,
+    partner_anchor: float | None,
+    margin_scale: float = MARGIN_SCALE,
+) -> float | None:
+    """Score this candidate *relative to a contrasting candidate of the same query*.
+
+    The previous absolute form — ``1 - llm_match_score`` on violations, nothing on
+    clean candidates — had ``score = 0`` everywhere as its trivial optimum, and the
+    policy found it: validation ``llm_match_score`` went 0.058 -> 0.000 within 25
+    steps and stayed there. Since ``llm_match_score`` carries weight 0.50 in the
+    final ranking, a constant collapses the reranker's relevance contribution
+    entirely, and judge-scored relevance fell (paired sign test against the SFT
+    student, p=0.012).
+
+    The fix is to reward *separation* rather than magnitude. ``partner_anchor`` is the
+    reference policy's score on a candidate of the same query with the opposite rule
+    verdict, precomputed offline. A violating candidate should land below it; a clean
+    one above it. Both halves are scored, so any constant output earns exactly 0.5 on
+    each — the degenerate solution is no longer optimal, it is average.
+
+    Returns ``None`` when no partner exists, which contributes no signal rather than
+    a guess.
     """
 
-    if not rule_verdict:
+    if partner_anchor is None:
         return None
-    return 1.0 - float(verdict["llm_match_score"])
+    score = float(verdict["llm_match_score"])
+    margin = (partner_anchor - score) if rule_verdict else (score - partner_anchor)
+    return max(0.0, min(0.5 + margin / (2.0 * margin_scale), 1.0))
 
 
 def compute_reward(
@@ -163,6 +182,7 @@ def compute_reward(
     *,
     terms: list[str],
     rule_verdict: bool | None,
+    partner_anchor: float | None = None,
     finish_reason: str | None = None,
     weights: RewardWeights | None = None,
 ) -> RewardBreakdown:
@@ -199,7 +219,7 @@ def compute_reward(
     if rule_verdict is not None and terms:
         r_constraint = constraint_reward(verdict, terms, rule_verdict)
         gated += active.constraint * r_constraint
-        r_score = score_reward(verdict, rule_verdict)
+        r_score = pairwise_score_reward(verdict, rule_verdict, partner_anchor)
         if r_score is not None:
             gated += active.score * r_score
 

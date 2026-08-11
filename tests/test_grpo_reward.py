@@ -68,23 +68,41 @@ def test_unparseable_output_earns_nothing_but_the_termination_term() -> None:
     assert breakdown.total == 0.0
 
 
-def test_the_score_term_is_asymmetric() -> None:
-    """Low scores are paid for on violations; high scores are never paid for.
+def test_a_constant_score_is_merely_average_under_the_pairwise_term() -> None:
+    """The degenerate solution the absolute reward had, and why this one blocks it.
 
-    Rewarding a high score on a clean candidate would invent supervision — relevance
-    has no verifiable ground truth here — and would let the score drift upward for
-    free, which is the recall-collapse hack in reverse.
+    ``r_score = 1 - llm_match_score`` on violations with nothing on clean candidates
+    made ``score = 0`` everywhere optimal, and the policy found it: validation
+    llm_match_score went 0.058 -> 0.000 in 25 steps and stayed. Since that field
+    carries weight 0.50 in the final ranking, the reranker's relevance contribution
+    vanished and judge-scored relevance fell against the SFT student (p=0.012).
+
+    Scoring separation instead, any constant lands exactly on the midpoint of both
+    halves — no longer optimal, merely average — while real separation beats it.
     """
 
-    violating_low = compute_reward(render(llm_match_score=0.05, violated_preferences=["系统"]), terms=["系统"], rule_verdict=True)
-    violating_high = compute_reward(render(llm_match_score=0.95, violated_preferences=["系统"]), terms=["系统"], rule_verdict=True)
-    assert violating_low.score is not None and violating_high.score is not None
-    assert violating_low.score > violating_high.score
+    anchor = 0.5
+    for constant in (0.0, 0.5, 1.0):
+        text = render(llm_match_score=constant)
+        on_violating = compute_reward(text, terms=["系统"], rule_verdict=True, partner_anchor=constant)
+        on_clean = compute_reward(text, terms=["系统"], rule_verdict=False, partner_anchor=constant)
+        assert on_violating.score == 0.5 and on_clean.score == 0.5
 
-    clean_low = compute_reward(render(llm_match_score=0.05), terms=["系统"], rule_verdict=False)
-    clean_high = compute_reward(render(llm_match_score=0.95), terms=["系统"], rule_verdict=False)
-    assert clean_low.score is None and clean_high.score is None
-    assert clean_low.total == clean_high.total
+    # Separating in the right direction beats the constant on both halves.
+    low_on_violating = compute_reward(render(llm_match_score=0.1), terms=["系统"], rule_verdict=True, partner_anchor=anchor)
+    high_on_clean = compute_reward(render(llm_match_score=0.9), terms=["系统"], rule_verdict=False, partner_anchor=anchor)
+    assert low_on_violating.score > 0.5 and high_on_clean.score > 0.5
+
+    # And separating the wrong way is punished, which the absolute form never did.
+    assert compute_reward(render(llm_match_score=0.9), terms=["系统"], rule_verdict=True, partner_anchor=anchor).score < 0.5
+
+
+def test_no_partner_means_no_score_signal() -> None:
+    """A query with no contrasting candidate contributes nothing, rather than a guess."""
+
+    breakdown = compute_reward(render(llm_match_score=0.0), terms=["系统"], rule_verdict=True, partner_anchor=None)
+    assert breakdown.score is None
+    assert breakdown.constraint is not None  # the constraint term still applies
 
 
 def test_flagging_everything_is_not_a_winning_strategy() -> None:

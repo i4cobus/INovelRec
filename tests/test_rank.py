@@ -469,3 +469,30 @@ def test_nested_objects_are_matched_by_depth() -> None:
     from src.llm_matcher import extract_json_object
 
     assert extract_json_object('{"a":{"b":1},"c":2}')["c"] == 2
+
+
+def test_confidence_scaled_risk_gives_the_constraint_a_wider_channel() -> None:
+    """0.15 was too thin to carry the verdict into the ranking.
+
+    After GRPO the reranker's agreement with the density rule rose 0.547 -> 0.705 on
+    held-out data, while the judge-scored violation rate in the top 10 moved 0.359 ->
+    0.353. The verdict got much better and almost none of it reached the ranking,
+    because a flat 0.15 against a score range near 1.0 cannot reorder much.
+
+    The default stays flat so every recorded number remains comparable; the scaled
+    policy is an explicit arm, exactly like fallback_policy's legacy control.
+    """
+
+    from src.llm_matcher import LLMMatchResult
+    from src.rank import violation_penalty
+
+    confident = LLMMatchResult(llm_match_score=0.2, confidence="high", violated_preferences=["系统"])
+    unsure = LLMMatchResult(llm_match_score=0.2, confidence="low", violated_preferences=["系统"])
+    clean = LLMMatchResult(llm_match_score=0.8, confidence="high")
+
+    assert violation_penalty(confident) == violation_penalty(unsure) == 0.15  # flat default
+    # Scaled: a sharp verdict moves more, a hesitant one moves less than the flat rate,
+    # so the model's 30% error rate is not amplified at full strength.
+    assert violation_penalty(confident, "confidence_scaled") > 0.15
+    assert violation_penalty(unsure, "confidence_scaled") < 0.15
+    assert violation_penalty(clean, "confidence_scaled") == 0.0

@@ -485,12 +485,43 @@ def compute_boilerplate_penalty(text: str) -> float:
     return 0.05 if hits else 0.0
 
 
-def compute_risk_penalty(match: LLMMatchResult, profile_text: str) -> float:
+RiskPolicy = Literal["flat", "confidence_scaled"]
+DEFAULT_RISK_POLICY: RiskPolicy = "flat"
+VIOLATION_PENALTY_FLAT = 0.15
+VIOLATION_PENALTY_MAX = 0.35
+
+
+def violation_penalty(match: LLMMatchResult, policy: RiskPolicy = DEFAULT_RISK_POLICY) -> float:
+    """How hard a claimed violation pushes a candidate down.
+
+    ``flat`` is the original 0.15 regardless of anything, and stays the default so
+    every number already recorded remains comparable.
+
+    ``confidence_scaled`` exists because 0.15 turned out to be too thin a channel to
+    carry the constraint signal. After GRPO the reranker's agreement with the density
+    rule rose from 0.547 to 0.705 on held-out data, yet the judge-scored violation
+    rate in the top 10 barely moved (0.359 -> 0.353): the verdict got much better and
+    almost none of it reached the ranking, because 0.15 against a score range of
+    roughly 1.0 cannot reorder much. Scaling by the model's own confidence raises the
+    ceiling to 0.35 while keeping a low-confidence claim cheap, so a sharper verdict
+    buys more movement without amplifying the model's 30% error rate at full strength.
+    """
+
+    if not match.violated_preferences:
+        return 0.0
+    if policy == "confidence_scaled":
+        return VIOLATION_PENALTY_MAX * match.confidence_score
+    return VIOLATION_PENALTY_FLAT
+
+
+def compute_risk_penalty(
+    match: LLMMatchResult,
+    profile_text: str,
+    risk_policy: RiskPolicy = DEFAULT_RISK_POLICY,
+) -> float:
     """Compute rule-based risk penalty from LLM fields and visible profile risks."""
 
-    penalty = 0.0
-    if match.violated_preferences:
-        penalty += 0.15
+    penalty = violation_penalty(match, risk_policy)
     if compute_boilerplate_penalty(profile_text) or any("boilerplate" in flag.lower() or "source" in flag.lower() for flag in match.risk_flags):
         penalty += 0.05
     if match.confidence == "low":

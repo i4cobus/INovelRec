@@ -65,10 +65,17 @@ def compute_score(
     else:
         rule_verdict = bool(raw)
 
+    anchor = info.get("partner_anchor")
+    try:
+        partner_anchor = float(anchor) if anchor is not None else None
+    except (TypeError, ValueError):
+        partner_anchor = None
+
     breakdown = compute_reward(
         solution_str,
         terms=terms,
         rule_verdict=rule_verdict,
+        partner_anchor=partner_anchor,
         weights=RewardWeights(
             constraint=weight_constraint,
             score=weight_score,

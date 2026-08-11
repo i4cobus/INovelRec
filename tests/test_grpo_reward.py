@@ -105,21 +105,30 @@ def test_no_partner_means_no_score_signal() -> None:
     assert breakdown.constraint is not None  # the constraint term still applies
 
 
-def test_flagging_everything_is_not_a_winning_strategy() -> None:
-    """The predicted hack, and the balanced batch is what defeats it.
+def test_discriminating_still_beats_both_degenerate_strategies() -> None:
+    """The anti-collapse property, restated for the asymmetric reward.
 
-    A policy that always claims a violation scores 1 on the violating half and 0 on
-    the clean half. With the pool balanced 50/50 that averages to the same as always
-    claiming nothing — so the only way up is actually discriminating.
+    Recall bias deliberately makes over-flagging cheaper than silence — that is the
+    point. What must survive is that neither shortcut beats actually discriminating.
+    Summed over the balanced pool's two halves: discriminating 2.0, flag-everything
+    1.4, stay-silent 1.0. The gap to flag-everything is what the 50/50 balance buys.
     """
 
-    always_flags = render(violated_preferences=["系统"], llm_match_score=0.0)
-    never_flags = render(violated_preferences=[], llm_match_score=0.0)
+    def total(text: str) -> float:
+        return sum(
+            compute_reward(text, terms=["系统"], rule_verdict=verdict).constraint
+            for verdict in (True, False)
+        )
 
-    for text in (always_flags, never_flags):
-        on_violating = compute_reward(text, terms=["系统"], rule_verdict=True).constraint
-        on_clean = compute_reward(text, terms=["系统"], rule_verdict=False).constraint
-        assert (on_violating + on_clean) == 1.0
+    flag_everything = total(render(violated_preferences=["系统"]))
+    stay_silent = total(render(violated_preferences=[]))
+    discriminate = (
+        compute_reward(render(violated_preferences=["系统"]), terms=["系统"], rule_verdict=True).constraint
+        + compute_reward(render(violated_preferences=[]), terms=["系统"], rule_verdict=False).constraint
+    )
+
+    assert discriminate > flag_everything > stay_silent
+    assert discriminate == 2.0
 
 
 def test_an_abstained_pair_carries_no_constraint_signal() -> None:
@@ -173,3 +182,29 @@ def test_termination_is_read_off_the_text_when_no_finish_reason_is_given() -> No
     assert compute_reward(clean + "\n  ", terms=["系统"], rule_verdict=True).terminate == 1.0
     # An explicit finish_reason still wins when a caller has one.
     assert compute_reward(rambled, terms=["系统"], rule_verdict=True, finish_reason="stop").terminate == 1.0
+
+
+def test_a_missed_violation_costs_more_than_a_false_alarm() -> None:
+    """The two errors are not equally bad, and symmetric accuracy hid that.
+
+    Missing a violation recommends a book the reader explicitly excluded. A false
+    alarm demotes a book that was fine. Under symmetric scoring the policy settled on
+    near-silence where it mattered — 0.4% of scored candidates flagged in the
+    evaluation top ten against the teacher's 19.6% — so every violation still
+    surviving there was a miss, which no amount of ranking penalty can repair.
+    """
+
+    silent = render(violated_preferences=[])
+    flagging = render(violated_preferences=["系统"])
+
+    miss = compute_reward(silent, terms=["系统"], rule_verdict=True).constraint
+    false_alarm = compute_reward(flagging, terms=["系统"], rule_verdict=False).constraint
+    correct = compute_reward(flagging, terms=["系统"], rule_verdict=True).constraint
+
+    assert correct == 1.0
+    assert miss < false_alarm < correct
+    assert miss == 0.0
+
+    # Silence is still not free on the clean half: being right there earns full marks,
+    # so the policy cannot buy recall by flagging everything.
+    assert compute_reward(silent, terms=["系统"], rule_verdict=False).constraint == 1.0

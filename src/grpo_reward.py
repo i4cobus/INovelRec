@@ -31,9 +31,22 @@ from src.llm_matcher import split_first_json_object
 REQUIRED_FIELDS = ("llm_match_score", "confidence", "matched_preferences", "violated_preferences", "risk_flags", "reason")
 VALID_CONFIDENCE = ("high", "medium", "low")
 
-DEFAULT_WEIGHT_CONSTRAINT = 0.5
+DEFAULT_WEIGHT_CONSTRAINT = 0.58
 DEFAULT_WEIGHT_SCORE = 0.4
-DEFAULT_WEIGHT_TERMINATE = 0.1
+# Format and termination both sit at 0.999 after one GRPO round — saturated, so most
+# of this weight was paying for behaviour already learned. A token amount keeps the
+# gradient from disappearing; the rest goes to the constraint term, which has not
+# saturated.
+DEFAULT_WEIGHT_TERMINATE = 0.02
+
+# A missed violation and a false alarm are not equally bad for the product. Missing
+# one recommends a book the reader explicitly excluded; a false alarm demotes a book
+# that was fine. Symmetric accuracy let the policy settle wherever the two balanced,
+# and it settled on near-silence in the region that matters: on the evaluation top
+# ten, GRPO-v2 flagged only 0.4% of scored candidates against the 32B teacher's
+# 19.6%, so the 27.1% of rule-arm violations still surviving there are all misses.
+# Penalty size cannot fix a miss; only recall can.
+FALSE_ALARM_CREDIT = 0.4
 # The teacher-agreement term is an ablation arm, off for the first run: the teacher's
 # rerank was not shown to beat baseline on relevance, so optimising toward it would
 # be fitting noise. Turned on later only to answer "does removing it collapse?".
@@ -136,9 +149,18 @@ def claims_violation(verdict: dict[str, Any], terms: list[str] | tuple[str, ...]
 
 
 def constraint_reward(verdict: dict[str, Any], terms: list[str], rule_verdict: bool) -> float:
-    """1 when the model's claim matches the rule's reading of the full novel."""
+    """Score the claim against the rule's reading of the full novel, asymmetrically.
 
-    return float(claims_violation(verdict, terms) == rule_verdict)
+    Correct either way earns 1. A false alarm still earns ``FALSE_ALARM_CREDIT``
+    because demoting a clean book is a mild error; a missed violation earns nothing,
+    because it puts an excluded book in front of the reader. See FALSE_ALARM_CREDIT
+    for why the symmetric version was not enough.
+    """
+
+    claimed = claims_violation(verdict, terms)
+    if claimed == rule_verdict:
+        return 1.0
+    return FALSE_ALARM_CREDIT if claimed else 0.0
 
 
 MARGIN_SCALE = 0.3

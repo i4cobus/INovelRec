@@ -30,7 +30,7 @@ from rich.table import Table
 app = typer.Typer(add_completion=False)
 console = Console(width=140)
 
-DEFAULT_POOL = Path("data/processed/grpo_pool.parquet")
+DEFAULT_POOL = Path("data/processed/grpo_pool_anchored.parquet")
 DEFAULT_OUT_DIR = Path("data/processed/verl")
 DATA_SOURCE = "inovelrec_constraint"
 
@@ -51,6 +51,13 @@ def to_verl_rows(frame: pd.DataFrame) -> list[dict]:
                     "constraint_terms": list(row.constraint_terms),
                     "rule_verdict": "true" if bool(row.rule_verdict) else "false",
                     "pool_rank": int(row.pool_rank),
+                    # None where the query had no opposite-class candidate; the reward
+                    # then contributes no score signal rather than inventing one.
+                    "partner_anchor": (
+                        None
+                        if getattr(row, "partner_anchor", None) is None or pd.isna(row.partner_anchor)
+                        else float(row.partner_anchor)
+                    ),
                 },
             }
         )

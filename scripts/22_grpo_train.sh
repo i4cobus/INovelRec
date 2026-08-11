@@ -10,8 +10,19 @@
 # Usage:  bash scripts/22_grpo_train.sh [N_GPUS] [EXPERIMENT_NAME]
 set -euo pipefail
 
-N_GPUS="${1:-4}"
+# 8, not 6. verl requires ppo_mini_batch_size % (n_gpus * micro_batch_per_gpu) == 0,
+# and 32 % (6 * 4) is not an integer — six cards fail the assertion outright. Four
+# and eight both divide; eight is chosen because every card is free, the actor shard
+# drops from 16 GB to 8 GB per GPU (real headroom on a first run whose memory profile
+# is still unmeasured), and a diagnostic run should return its verdict sooner.
+N_GPUS="${1:-8}"
 EXPERIMENT="${2:-grpo-constraint-v1}"
+# A step budget rather than an epoch: one epoch over 13,468 episodes is ~210 steps,
+# and the first run exists to read the monitoring curves, not to converge.
+MAX_STEPS="${3:-50}"
+# Consume them, so the trailing "$@" forwards only genuine hydra overrides. Left in
+# place, hydra tries to parse "8" as an override and dies on LexerNoViableAltException.
+shift $(( $# < 3 ? $# : 3 ))
 PROJECT=/data/huangyanyu/INovelRec
 VENV=/data/huangyanyu/.venv-verl
 
@@ -24,6 +35,20 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn
 # the local vLLM endpoint.
 export no_proxy="localhost,127.0.0.1,0.0.0.0"
 export NO_PROXY="$no_proxy"
+
+# flash-attn is not installable on this host and both settings below follow from that.
+#
+# verl defaults the actor to flash_attention_2, and use_remove_padding routes through
+# verl/utils/attention_utils.py, which imports flash_attn.bert_padding on CUDA with no
+# fallback. There is no prebuilt flash-attn wheel for torch 2.9 or 2.10 in any upstream
+# release, and building from source needs a CUDA 12.x toolkit to match torch's cu128 —
+# this host only has nvcc 11.7 and no root.
+#
+# So: SDPA attention, and padding kept. The cost is real (padded tokens get computed,
+# and response lengths here vary from a 74-token median to a 512-token tail), but it is
+# throughput, not correctness. Flip both back the day a matching wheel exists.
+ATTN="${ATTN:-sdpa}"
+REMOVE_PADDING="${REMOVE_PADDING:-False}"
 
 cd "$PROJECT"
 
@@ -47,7 +72,8 @@ fi
   data.filter_overlong_prompts=True \
   data.truncation=error \
   actor_rollout_ref.model.path=data/checkpoints/sft-qwen3-4b \
-  actor_rollout_ref.model.use_remove_padding=True \
+  +actor_rollout_ref.model.override_config.attn_implementation="$ATTN" \
+  actor_rollout_ref.model.use_remove_padding="$REMOVE_PADDING" \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \
   actor_rollout_ref.actor.optim.lr=1e-6 \
   actor_rollout_ref.actor.ppo_mini_batch_size=32 \
@@ -78,5 +104,6 @@ fi
   trainer.save_freq=50 \
   trainer.test_freq=25 \
   trainer.total_epochs=1 \
+  trainer.total_training_steps="$MAX_STEPS" \
   trainer.default_local_dir="data/checkpoints/$EXPERIMENT" \
   "$@"

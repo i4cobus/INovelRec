@@ -26,13 +26,15 @@ from rich.console import Console
 from rich.table import Table
 
 from src.config import DEFAULT_OUTPUT_PATH
-from src.preferences import IN_TEXT_NEGATIVES, term_density
+from src.preferences import COUNTED_WORDS, term_density
 
 app = typer.Typer(add_completion=False)
 console = Console(width=140)
 
 DEFAULT_DENSITY_PATH = Path("data/processed/term_density.parquet")
-TERMS = sorted(IN_TEXT_NEGATIVES)
+# Every surface form, not the 13 base exclusions: the table stores raw counts so a
+# revised synonym set is a lookup change rather than another pass over 36 GB.
+TERMS = list(COUNTED_WORDS)
 
 
 def measure_one(row: dict[str, object]) -> dict[str, object] | None:

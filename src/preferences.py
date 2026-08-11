@@ -28,16 +28,46 @@ NEGATIVE_MARKERS = ("不要", "避免", "不", "别", "无", "非")
 # judgement call and has to go through the judge. Keeping the two apart is what lets
 # the project report rule-verifiable and purely semantic constraints as separate arms
 # — and the gap between them is what the reward-hacking divergence plot measures.
-IN_TEXT_NEGATIVES = frozenset(
-    {
-        "系统", "穿越", "重生", "修仙", "修真", "恋爱",
-        "机甲", "直播", "校园", "异能", "僵尸", "变身", "兽人",
-    }
-)
+# Each exclusion is a *set* of surface forms, not one word. The rule missed a third
+# of real violations because the excluded word is often not the word the novel uses:
+# a book the judge called saturated with 异能 mentions that term at density 0.25 and
+# writes 觉醒者 / 能力者 throughout. Density is summed over the set — occurrences
+# divided by length is additive, so the merge is exact rather than an approximation.
+#
+# Members passed two label-free screens. First, firing rate over all 7,656 novels,
+# where the bar is *genre specificity* rather than rarity: 金丹 fires on 10.3% of the
+# corpus and belongs because 修真 is a large genre, while 观众 fires on 15.1% and does
+# not, because sport, theatre and courtroom scenes all have an audience.
+#
+# Second, rank correlation with the base term across the same corpus. A real synonym
+# appears in the same books. This dropped 宿主, 打赏, 上辈子, 同桌, 操纵杆 and others
+# that looked plausible and were not: 上辈子 correlates 0.05 with 重生.
+#
+# Neither screen touches the judge labels. Selecting the vocabulary to agree with them
+# would make the reward and the evaluation share a source, and a later gain on that
+# metric would be self-fulfilling — the same anti-circularity rule the project holds
+# elsewhere.
+TERM_SYNONYMS: dict[str, frozenset[str]] = {
+    "系统": frozenset({"系统", "任务奖励"}),
+    "穿越": frozenset({"穿越", "异世界"}),
+    "重生": frozenset({"重生"}),
+    "修仙": frozenset({"修仙", "筑基", "金丹", "元婴", "渡劫", "灵根", "仙门"}),
+    "修真": frozenset({"修真", "筑基", "金丹", "元婴", "渡劫", "灵根"}),
+    "恋爱": frozenset({"恋爱"}),
+    "机甲": frozenset({"机甲", "驾驶舱"}),
+    "直播": frozenset({"直播", "弹幕", "主播"}),
+    "校园": frozenset({"校园", "班主任", "高考", "学长"}),
+    "异能": frozenset({"异能", "能力者", "异能者", "超能力"}),
+    "僵尸": frozenset({"僵尸", "尸毒", "养尸", "尸王"}),
+    "变身": frozenset({"变身"}),
+    "兽人": frozenset({"兽人", "半兽", "兽族"}),
+}
 
-# Reader-facing labels. A keyword rule cannot see these, so they are the *semantic*
-# arm by definition rather than by oversight. Listed explicitly instead of being an
-# open complement so that a new term has to be classified deliberately.
+# Every surface form the density table has to measure.
+COUNTED_WORDS: tuple[str, ...] = tuple(sorted({word for words in TERM_SYNONYMS.values() for word in words}))
+
+IN_TEXT_NEGATIVES = frozenset(TERM_SYNONYMS)
+
 META_LABEL_NEGATIVES = frozenset(
     {
         "后宫", "宫斗", "种马", "争霸", "玄幻", "灵异", "超能力", "言情", "恋爱脑",
@@ -75,6 +105,27 @@ def term_density(text: str, term: str) -> float:
     return text.count(term) / len(text) * 1e5
 
 
+def merged_density(text: str, term: str) -> float:
+    """Density of an exclusion, counting every surface form in its set.
+
+    Occurrences over length is additive, so summing the members is exact: the merged
+    density is what a single word whose spelling varied would have measured.
+    """
+
+    return sum(term_density(text, word) for word in TERM_SYNONYMS.get(term, frozenset({term})))
+
+
+def merged_density_from_table(densities: Mapping[str, float], term: str) -> float:
+    """Same sum, from the precomputed per-word table.
+
+    The table stores raw surface forms rather than merged totals, so revising a
+    synonym set never requires another 36 GB pass over the corpus — only this lookup
+    changes.
+    """
+
+    return sum(float(densities.get(word, 0.0)) for word in TERM_SYNONYMS.get(term, frozenset({term})))
+
+
 def constraint_violation_by_rule(text: str, terms: list[str] | tuple[str, ...]) -> bool | None:
     """Decide whether ``text`` violates an exclusion, or decline to decide.
 
@@ -92,7 +143,7 @@ def constraint_violation_by_rule(text: str, terms: list[str] | tuple[str, ...]) 
     checkable = [term for term in terms if is_rule_checkable(term)]
     if not checkable:
         return None
-    return violation_from_density(max(term_density(text, term) for term in checkable))
+    return violation_from_density(max(merged_density(text, term) for term in checkable))
 
 
 def violation_from_density(density: float) -> bool | None:
@@ -126,7 +177,7 @@ def constraint_violation_from_densities(
     checkable = [term for term in terms if is_rule_checkable(term)]
     if not checkable:
         return None
-    return violation_from_density(max(float(densities.get(term, 0.0)) for term in checkable))
+    return violation_from_density(max(merged_density_from_table(densities, term) for term in checkable))
 
 
 @dataclass(frozen=True)

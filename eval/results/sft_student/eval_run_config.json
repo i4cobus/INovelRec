@@ -1,0 +1,15 @@
+{
+  "top_k": 10,
+  "candidate_k": 100,
+  "llm_candidate_k": 20,
+  "top_k_per_query": 100,
+  "fallback_policy": "impute",
+  "embedding_model": "Qwen/Qwen3-Embedding-8B",
+  "llm_model": "sft-student",
+  "expansion_model": "Qwen/Qwen3-32B",
+  "backend": "http",
+  "mode": "both",
+  "queries": 59,
+  "expansion_prompt_version": "expand_v1",
+  "llm_prompt_version": "stage4_llm_rerank_v4_no_retrieval_anchor"
+}

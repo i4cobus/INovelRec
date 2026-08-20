@@ -1,0 +1,97 @@
+{
+  "baseline": {
+    "label": "baseline",
+    "pairs": 278,
+    "decided": 233,
+    "abstained": 45,
+    "agreement": 0.7124463519313304,
+    "rule_miss_rate": 0.3516483516483517,
+    "rule_false_positive": 35,
+    "confusion": {
+      "true_positive": 59,
+      "false_positive": 35,
+      "false_negative": 32,
+      "true_negative": 107
+    },
+    "by_term": {
+      "修仙": {
+        "n": 17,
+        "agreement": 0.7058823529411765,
+        "misses": 5,
+        "over_fires": 0
+      },
+      "修真": {
+        "n": 16,
+        "agreement": 0.875,
+        "misses": 2,
+        "over_fires": 0
+      },
+      "僵尸": {
+        "n": 13,
+        "agreement": 0.6923076923076923,
+        "misses": 0,
+        "over_fires": 4
+      },
+      "兽人": {
+        "n": 17,
+        "agreement": 0.5294117647058824,
+        "misses": 0,
+        "over_fires": 8
+      },
+      "变身": {
+        "n": 6,
+        "agreement": 0.6666666666666666,
+        "misses": 1,
+        "over_fires": 1
+      },
+      "异能": {
+        "n": 16,
+        "agreement": 0.4375,
+        "misses": 9,
+        "over_fires": 0
+      },
+      "恋爱": {
+        "n": 9,
+        "agreement": 0.5555555555555556,
+        "misses": 4,
+        "over_fires": 0
+      },
+      "机甲": {
+        "n": 15,
+        "agreement": 0.7333333333333333,
+        "misses": 1,
+        "over_fires": 3
+      },
+      "校园": {
+        "n": 11,
+        "agreement": 0.7272727272727273,
+        "misses": 3,
+        "over_fires": 0
+      },
+      "直播": {
+        "n": 16,
+        "agreement": 0.875,
+        "misses": 0,
+        "over_fires": 2
+      },
+      "穿越": {
+        "n": 14,
+        "agreement": 0.7857142857142857,
+        "misses": 2,
+        "over_fires": 1
+      },
+      "系统": {
+        "n": 72,
+        "agreement": 0.75,
+        "misses": 2,
+        "over_fires": 16
+      },
+      "重生": {
+        "n": 11,
+        "agreement": 0.7272727272727273,
+        "misses": 3,
+        "over_fires": 0
+      }
+    }
+  }
+}

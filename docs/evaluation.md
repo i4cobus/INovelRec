@@ -51,6 +51,9 @@ Outputs:
 - `eval/results/eval_results.csv`
 - `eval/results/eval_results.jsonl`
 
+Of these, only the judge-labelled join is committed — see `eval/results/README.md`
+for what is kept and what is held back.
+
 ## Automatic Anchor Metrics
 
 Anchor metrics check whether optional known titles appear in top-k results.

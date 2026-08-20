@@ -4,11 +4,26 @@ __pycache__/
 *.pyc
 data/
 reports/
-eval/results/
+# Evaluation artifacts. The aggregate JSONs and the per-arm judged rows are the
+# evidence behind every number in the README, so they are tracked. Everything
+# else under here is either raw intermediate output (the judged CSV is a strict
+# superset of it) or carries raw corpus text and stays out.
+eval/results/*
+!eval/results/*.json
+!eval/results/README.md
+!eval/results/eval_results_judged.csv
+!eval/results/eval_results_judged_clean.csv
+!eval/results/eval_results_judged_flash.csv
+!eval/results/*/
+eval/results/*/*
+!eval/results/*/eval_results_judged.csv
+!eval/results/*/eval_run_config.json
 eval/manual_judgements.csv
 # Annotation sheets inline raw novel excerpts from the private corpus.
 eval/manual_judgements_sheet.csv
 eval/*_sheet.csv
+# Inlines ~4,200 chars of raw novel text per entry, same as the sheets above.
+eval/disagreements_to_review.md
 docs/prompt*.md
 docs/pre_interview.md
 streamlit.out.log

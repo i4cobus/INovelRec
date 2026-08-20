@@ -1,0 +1,240 @@
+[
+  {
+    "group": "已在规则臂",
+    "query_id": "q001",
+    "query": "凡人流 仙侠 慢热 理性主角 不系统",
+    "unwanted": [
+      "系统"
+    ],
+    "violating": 3,
+    "abstain": 2,
+    "clean": 5,
+    "scored": 10,
+    "violation_rate": 0.3,
+    "median_density": 2.2726918945844554
+  },
+  {
+    "group": "已在规则臂",
+    "query_id": "q015",
+    "query": "武侠 江湖恩怨 快意恩仇 不修仙",
+    "unwanted": [
+      "修仙"
+    ],
+    "violating": 0,
+    "abstain": 1,
+    "clean": 9,
+    "scored": 10,
+    "violation_rate": 0.0,
+    "median_density": 0.02022330983182498
+  },
+  {
+    "group": "已在规则臂",
+    "query_id": "q016",
+    "query": "传统武侠 武功体系严谨 侠义 不穿越",
+    "unwanted": [
+      "穿越"
+    ],
+    "violating": 5,
+    "abstain": 3,
+    "clean": 2,
+    "scored": 10,
+    "violation_rate": 0.5,
+    "median_density": 3.3364163278745553
+  },
+  {
+    "group": "已在规则臂",
+    "query_id": "q019",
+    "query": "三国 争霸天下 布局严谨 不系统",
+    "unwanted": [
+      "系统"
+    ],
+    "violating": 6,
+    "abstain": 1,
+    "clean": 3,
+    "scored": 10,
+    "violation_rate": 0.6,
+    "median_density": 8.318674969760627
+  },
+  {
+    "group": "已在规则臂",
+    "query_id": "q021",
+    "query": "美食 日常 温情 不系统",
+    "unwanted": [
+      "系统"
+    ],
+    "violating": 7,
+    "abstain": 0,
+    "clean": 3,
+    "scored": 10,
+    "violation_rate": 0.7,
+    "median_density": 29.7264328306054
+  },
+  {
+    "group": "已在规则臂",
+    "query_id": "q034",
+    "query": "体育 竞技 写实 不系统",
+    "unwanted": [
+      "系统"
+    ],
+    "violating": 8,
+    "abstain": 2,
+    "clean": 0,
+    "scored": 10,
+    "violation_rate": 0.8,
+    "median_density": 15.503270979247766
+  },
+  {
+    "group": "已在规则臂",
+    "query_id": "q049",
+    "query": "洪荒 大能博弈 设定宏大 不系统",
+    "unwanted": [
+      "系统"
+    ],
+    "violating": 4,
+    "abstain": 1,
+    "clean": 5,
+    "scored": 10,
+    "violation_rate": 0.4,
+    "median_density": 1.8832710912237682
+  },
+  {
+    "group": "候选",
+    "query_id": "q053",
+    "query": "历史 争霸 权谋 布局严谨 不重生",
+    "unwanted": [
+      "重生"
+    ],
+    "violating": 0,
+    "abstain": 3,
+    "clean": 7,
+    "scored": 10,
+    "violation_rate": 0.0,
+    "median_density": 0.3645924354847609
+  },
+  {
+    "group": "候选",
+    "query_id": "q054",
+    "query": "武侠 内功 江湖门派 不修真",
+    "unwanted": [
+      "修真"
+    ],
+    "violating": 0,
+    "abstain": 0,
+    "clean": 10,
+    "scored": 10,
+    "violation_rate": 0.0,
+    "median_density": 0.0
+  },
+  {
+    "group": "候选",
+    "query_id": "q055",
+    "query": "想看纯事业线的职场商战，主角别谈恋爱",
+    "unwanted": [
+      "恋爱"
+    ],
+    "violating": 2,
+    "abstain": 5,
+    "clean": 3,
+    "scored": 10,
+    "violation_rate": 0.2,
+    "median_density": 2.009209959200075
+  },
+  {
+    "group": "候选",
+    "query_id": "q056",
+    "query": "星际 舰队 太空战争 不机甲",
+    "unwanted": [
+      "机甲"
+    ],
+    "violating": 6,
+    "abstain": 2,
+    "clean": 2,
+    "scored": 10,
+    "violation_rate": 0.6,
+    "median_density": 282.24739392081364
+  },
+  {
+    "group": "候选",
+    "query_id": "q057",
+    "query": "硬核荒野求生、生存技巧扎实的，不要直播流",
+    "unwanted": [
+      "直播"
+    ],
+    "violating": 8,
+    "abstain": 0,
+    "clean": 2,
+    "scored": 10,
+    "violation_rate": 0.8,
+    "median_density": 73.6664138528037
+  },
+  {
+    "group": "候选",
+    "query_id": "q058",
+    "query": "都市异能，主角是成年人、有社会阅历，不要校园背景",
+    "unwanted": [
+      "校园"
+    ],
+    "violating": 0,
+    "abstain": 2,
+    "clean": 8,
+    "scored": 10,
+    "violation_rate": 0.0,
+    "median_density": 0.19449829165667162
+  },
+  {
+    "group": "候选",
+    "query_id": "q059",
+    "query": "末世 生存 物资调度 写实 不异能",
+    "unwanted": [
+      "异能"
+    ],
+    "violating": 3,
+    "abstain": 1,
+    "clean": 6,
+    "scored": 10,
+    "violation_rate": 0.3,
+    "median_density": 0.30613619386992885
+  },
+  {
+    "group": "候选",
+    "query_id": "q060",
+    "query": "民国 灵异 探案 氛围压抑 不僵尸",
+    "unwanted": [
+      "僵尸"
+    ],
+    "violating": 6,
+    "abstain": 1,
+    "clean": 3,
+    "scored": 10,
+    "violation_rate": 0.6,
+    "median_density": 19.157062986061266
+  },
+  {
+    "group": "候选",
+    "query_id": "q061",
+    "query": "类似穿越到动漫世界那种同人冒险，但不要变身",
+    "unwanted": [
+      "变身"
+    ],
+    "violating": 1,
+    "abstain": 6,
+    "clean": 3,
+    "scored": 10,
+    "violation_rate": 0.1,
+    "median_density": 2.203856749311295
+  },
+  {
+    "group": "候选",
+    "query_id": "q062",
+    "query": "类似剑与魔法那种正统西幻冒险，但不要兽人",
+    "unwanted": [
+      "兽人"
+    ],
+    "violating": 6,
+    "abstain": 1,
+    "clean": 3,
+    "scored": 10,
+    "violation_rate": 0.6,
+    "median_density": 25.163691081377852
+  }
+]
